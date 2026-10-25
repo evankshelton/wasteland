@@ -47,6 +47,8 @@ const server = new GameServer(world, storage, {
   saveIntervalMs: 5_000,
   tickMs: 250,
   monsters: DEFAULT_MONSTER_OPTIONS,
+  encounterRadius: 8,
+  encounterGraceMs: 3_000,
 });
 
 await server.start();

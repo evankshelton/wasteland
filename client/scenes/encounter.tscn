@@ -1,0 +1,197 @@
+[gd_scene load_steps=10 format=3]
+
+[ext_resource type="Script" path="res://scripts/encounter.gd" id="1_enc"]
+[ext_resource type="Theme" path="res://ui/theme.tres" id="2_theme"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_dust"]
+sky_top_color = Color(0.14, 0.09, 0.07, 1)
+sky_horizon_color = Color(0.58, 0.34, 0.16, 1)
+ground_bottom_color = Color(0.08, 0.06, 0.05, 1)
+ground_horizon_color = Color(0.42, 0.26, 0.14, 1)
+
+[sub_resource type="Sky" id="Sky_dust"]
+sky_material = SubResource("ProceduralSkyMaterial_dust")
+
+[sub_resource type="Environment" id="Environment_waste"]
+background_mode = 2
+sky = SubResource("Sky_dust")
+ambient_light_source = 3
+ambient_light_color = Color(0.6, 0.45, 0.35, 1)
+ambient_light_energy = 0.7
+tonemap_mode = 2
+glow_enabled = true
+fog_enabled = true
+fog_light_color = Color(0.42, 0.28, 0.17, 1)
+fog_density = 0.014
+
+[sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
+radius = 0.35
+height = 1.8
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_health_bg"]
+bg_color = Color(0.15, 0.02, 0.02, 1)
+border_width_left = 1
+border_width_top = 1
+border_width_right = 1
+border_width_bottom = 1
+border_color = Color(0.4, 0.4, 0.4, 1)
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_health_fill"]
+bg_color = Color(0.85, 0.15, 0.1, 1)
+
+[node name="Encounter" type="Node3D"]
+script = ExtResource("1_enc")
+
+[node name="Environment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_waste")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+unique_name_in_owner = true
+light_color = Color(1, 0.78, 0.55, 1)
+light_energy = 1.1
+shadow_enabled = true
+
+[node name="Arena" type="Node3D" parent="."]
+unique_name_in_owner = true
+
+[node name="Enemies" type="Node3D" parent="."]
+unique_name_in_owner = true
+
+[node name="Player" type="CharacterBody3D" parent="."]
+unique_name_in_owner = true
+collision_layer = 2
+collision_mask = 5
+
+[node name="Shape" type="CollisionShape3D" parent="Player"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
+shape = SubResource("CapsuleShape3D_player")
+
+[node name="Camera" type="Camera3D" parent="Player"]
+unique_name_in_owner = true
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
+current = true
+fov = 80.0
+near = 0.05
+
+[node name="Gun" type="Node3D" parent="Player/Camera"]
+unique_name_in_owner = true
+transform = Transform3D(0.6, 0, 0, 0, 0.6, 0, 0, 0, 0.6, 0.3, -0.28, -0.75)
+
+[node name="MuzzleFlash" type="OmniLight3D" parent="Player/Camera/Gun"]
+unique_name_in_owner = true
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.02, -0.7)
+light_color = Color(1, 0.8, 0.4, 1)
+light_energy = 0.0
+omni_range = 7.0
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Root" type="Control" parent="HUD"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme = ExtResource("2_theme")
+
+[node name="DamageFlash" type="ColorRect" parent="HUD/Root"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(0.8, 0, 0, 0)
+
+[node name="Crosshair" type="Label" parent="HUD/Root"]
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -20.0
+offset_top = -20.0
+offset_right = 20.0
+offset_bottom = 20.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_colors/font_color = Color(1, 1, 0.333333, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 28
+text = "+"
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="Status" type="PanelContainer" parent="HUD/Root"]
+layout_mode = 1
+offset_left = 12.0
+offset_top = 12.0
+offset_right = 312.0
+offset_bottom = 72.0
+
+[node name="VBox" type="VBoxContainer" parent="HUD/Root/Status"]
+layout_mode = 2
+
+[node name="EnemiesLabel" type="Label" parent="HUD/Root/Status/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.333333, 1, 0.333333, 1)
+text = "ZOMBIES: 0   HEALTH: 100"
+
+[node name="HealthBar" type="ProgressBar" parent="HUD/Root/Status/VBox"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(280, 14)
+layout_mode = 2
+theme_override_styles/background = SubResource("StyleBoxFlat_health_bg")
+theme_override_styles/fill = SubResource("StyleBoxFlat_health_fill")
+value = 100.0
+show_percentage = false
+
+[node name="Hint" type="Label" parent="HUD/Root"]
+unique_name_in_owner = true
+layout_mode = 1
+anchors_preset = 7
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -480.0
+offset_top = -40.0
+offset_right = 480.0
+offset_bottom = -12.0
+grow_horizontal = 2
+grow_vertical = 0
+theme_override_colors/font_color = Color(0.85, 0.85, 0.85, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 16
+text = "Kill them all, or run past the rusty posts to flee.   WASD: move   Mouse: aim   Click/Space: shoot   Esc: free mouse"
+horizontal_alignment = 1
+
+[node name="Banner" type="Label" parent="HUD/Root"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -400.0
+offset_top = -110.0
+offset_right = 400.0
+offset_bottom = -40.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 8
+theme_override_font_sizes/font_size = 56
+text = "AREA CLEARED"
+horizontal_alignment = 1
+vertical_alignment = 1

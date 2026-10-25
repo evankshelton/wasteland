@@ -1,7 +1,8 @@
 // Radioactive zombies: spawned out in the wasteland around players, they
-// shamble one tile at a time towards the nearest player. They never enter the
-// base. Zombies are transient: they despawn when nobody is around and are not
-// persisted across server restarts.
+// shamble one tile at a time towards the nearest player. Stepping onto a
+// player's tile is a "contact", which the game server turns into an
+// encounter. They never enter the base. Zombies are transient: they despawn
+// when nobody is around and are not persisted across server restarts.
 import { T, isPassable } from "./tiles.ts";
 import type { World } from "./world.ts";
 import { BASE } from "./worldgen.ts";
@@ -20,6 +21,12 @@ export interface Monster {
 export interface Pos {
   x: number;
   y: number;
+}
+
+export interface PlayerPos extends Pos {
+  id: number;
+  /** False while the player is in an encounter or just left one: no chasing, no spawns. */
+  targetable: boolean;
 }
 
 export interface MonsterOptions {
@@ -50,6 +57,11 @@ export const DEFAULT_MONSTER_OPTIONS: MonsterOptions = {
   despawnAfterMs: 20_000,
 };
 
+export interface Contact {
+  playerId: number;
+  monsterId: number;
+}
+
 const cheb = (a: Pos, b: Pos) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
 
 /** The base and the ring just outside its walls are off limits to zombies. */
@@ -75,11 +87,29 @@ export class Monsters {
     return undefined;
   }
 
-  /** Advance the zombies. Returns ids that spawned or moved, and ids removed. */
-  tick(now: number, players: Pos[]): { changed: Set<number>; removed: number[] } {
+  /** Remove and return every monster within `radius` tiles of `center` (for an encounter). */
+  take(center: Pos, radius: number): Monster[] {
+    const taken = [...this.all.values()].filter((m) => cheb(m, center) <= radius);
+    for (const m of taken) this.all.delete(m.id);
+    return taken;
+  }
+
+  /** Put a monster back on the map if its tile is still free. Returns false if it was dropped. */
+  restore(m: Monster, now: number, players: Pos[]): boolean {
+    if (!this.canEnter(m.x, m.y, players)) return false;
+    m.nextStepAt = now + this.opts.stepMs * 2; // A moment to regroup before chasing again.
+    m.lastNearPlayerAt = now;
+    this.all.set(m.id, m);
+    return true;
+  }
+
+  /** Advance the zombies. Returns ids that spawned or moved, ids removed, and zombies that reached a player. */
+  tick(now: number, players: PlayerPos[]): { changed: Set<number>; removed: number[]; contacts: Contact[] } {
     const changed = new Set<number>();
     const removed: number[] = [];
+    const contacts: Contact[] = [];
     const o = this.opts;
+    const targets = players.filter((p) => p.targetable);
 
     for (const m of this.all.values()) {
       if (players.some((p) => cheb(p, m) <= o.despawnTiles)) {
@@ -90,7 +120,7 @@ export class Monsters {
       }
     }
 
-    for (const p of players) {
+    for (const p of targets) {
       if (Math.hypot(p.x, p.y) < BASE.clearRadius || this.rng() >= o.spawnChance) continue;
       let near = 0;
       for (const m of this.all.values()) if (cheb(m, p) <= o.spawnMaxTiles) near++;
@@ -102,37 +132,43 @@ export class Monsters {
       changed.add(m.id);
     }
 
+    const contacted = new Set<number>();
     for (const m of this.all.values()) {
       if (now < m.nextStepAt) continue;
       m.nextStepAt = now + o.stepMs;
-      let target: Pos | undefined;
-      for (const p of players) {
+      let target: PlayerPos | undefined;
+      for (const p of targets) {
+        if (contacted.has(p.id)) continue;
         if (cheb(p, m) <= o.aggroTiles && (!target || cheb(p, m) < cheb(target, m))) target = p;
       }
       const step = target ? this.stepToward(m, target, players) : this.rng() < 0.3 ? this.wander(m, players) : undefined;
-      if (step) {
-        m.x = step.x;
-        m.y = step.y;
-        changed.add(m.id);
+      if (!step) continue;
+      m.x = step.x;
+      m.y = step.y;
+      changed.add(m.id);
+      if (target && m.x === target.x && m.y === target.y) {
+        contacts.push({ playerId: target.id, monsterId: m.id });
+        contacted.add(target.id);
       }
     }
-    return { changed, removed };
+    return { changed, removed, contacts };
   }
 
-  private canEnter(x: number, y: number, players: Pos[]): boolean {
+  /** Free for a zombie to stand on; `prey` (the player being chased) is allowed. */
+  private canEnter(x: number, y: number, players: Pos[], prey?: Pos): boolean {
     return (
       !inSafeZone(x, y) &&
       isPassable(this.world.tileAt(x, y)) &&
       !this.at(x, y) &&
-      !players.some((p) => p.x === x && p.y === y)
+      !players.some((p) => p !== prey && p.x === x && p.y === y)
     );
   }
 
   /** Greedy shamble: close the larger gap first, sometimes the other one to slide round obstacles. */
-  private stepToward(m: Monster, t: Pos, players: Pos[]): Pos | undefined {
+  private stepToward(m: Monster, t: PlayerPos, players: Pos[]): Pos | undefined {
     const dx = t.x - m.x;
     const dy = t.y - m.y;
-    if (Math.abs(dx) + Math.abs(dy) <= 1) return undefined; // Adjacent: loom.
+    if (dx === 0 && dy === 0) return undefined;
     const horizontal = { x: m.x + Math.sign(dx), y: m.y };
     const vertical = { x: m.x, y: m.y + Math.sign(dy) };
     let options: Pos[] = [];
@@ -140,7 +176,7 @@ export class Monsters {
     if (dy !== 0) options.push(vertical);
     const preferVertical = Math.abs(dy) > Math.abs(dx) || (Math.abs(dy) === Math.abs(dx) && this.rng() < 0.5);
     if (options.length === 2 && preferVertical !== this.rng() < 0.2) options = [vertical, horizontal];
-    return options.find((s) => this.canEnter(s.x, s.y, players));
+    return options.find((s) => this.canEnter(s.x, s.y, players, t));
   }
 
   private wander(m: Monster, players: Pos[]): Pos | undefined {

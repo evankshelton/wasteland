@@ -1,7 +1,7 @@
 // Wire protocol: one JSON object per WebSocket text message, discriminated by `t`.
 // Keep in sync with client/scripts/net.gd and docs/PROTOCOL.md.
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** Most chunk coordinates a client may ask for in one map_chunks request. */
 export const MAP_BATCH_MAX = 256;
@@ -20,7 +20,11 @@ export type ClientMsg =
   | { t: "hello"; v: number; name: string; token?: string }
   | { t: "move"; dir: Dir; seq: number }
   | { t: "map" }
-  | { t: "map_chunks"; coords: [number, number][] };
+  | { t: "map_chunks"; coords: [number, number][] }
+  | { t: "encounter_end"; id: number; result: EncounterResult; killed: number[]; dir?: Dir };
+
+export type EncounterResult = "victory" | "fled" | "died";
+const RESULTS: readonly string[] = ["victory", "fled", "died"];
 
 // ---- server -> client ----
 export type ServerMsg =
@@ -44,6 +48,18 @@ export type ServerMsg =
   | { t: "map_batch_done" }
   | { t: "monster"; id: number; kind: string; x: number; y: number } // appeared in view or moved
   | { t: "monster_left"; id: number }
+  // A zombie reached the player: fight every enemy within `radius` tiles in first person.
+  // Enemy dx/dy are tile offsets from the player at (x, y).
+  | {
+      t: "encounter_start";
+      id: number;
+      x: number;
+      y: number;
+      radius: number;
+      seed: number;
+      enemies: { id: number; kind: string; dx: number; dy: number }[];
+    }
+  | { t: "encounter_over"; id: number; result: EncounterResult; x: number; y: number }
   | { t: "error"; code: string; message: string };
 
 const NAME_RE = /^[A-Za-z0-9 _-]{2,16}$/;
@@ -76,6 +92,12 @@ export function parseClientMsg(raw: string): ClientMsg | undefined {
         coords.push([c[0], c[1]]);
       }
       return { t: "map_chunks", coords };
+    }
+    case "encounter_end": {
+      if (typeof o.id !== "number" || typeof o.result !== "string" || !RESULTS.includes(o.result)) return undefined;
+      if (!Array.isArray(o.killed) || o.killed.length > 256 || !o.killed.every(Number.isSafeInteger)) return undefined;
+      if (o.dir !== undefined && (typeof o.dir !== "string" || !(o.dir in DIR_DELTA))) return undefined;
+      return { t: "encounter_end", id: o.id, result: o.result as EncounterResult, killed: o.killed as number[], dir: o.dir as Dir | undefined };
     }
     default:
       return undefined;

@@ -36,7 +36,7 @@ to close it.
 
 All keys are input actions you can rebind in *Project Settings → Input Map*:
 `move_up`, `move_down`, `move_left`, `move_right`, `open_map`, `map_zoom_in`,
-`map_zoom_out`, `map_center`.
+`map_zoom_out`, `map_center`, `shoot`.
 
 Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --autoconnect`
 
@@ -57,11 +57,28 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
 - **Radioactive zombies** spawn out in the wasteland, 12–18 tiles from a player
   (just off screen), more readily in hot zones. They shamble one tile every
   0.9s (players are about 7× faster) towards the nearest player within 20
-  tiles, block movement, and can't enter the base or the ring just outside
-  its walls. Nothing spawns within 16 tiles of the base. At most 4 gather
-  around a player, and they despawn after 20s with nobody nearby. They are not
-  saved across server restarts, and don't attack yet. Tuning lives in
-  `DEFAULT_MONSTER_OPTIONS` in `server/src/monsters.ts`.
+  tiles, and can't enter the base or the ring just outside its walls. Nothing
+  spawns within 16 tiles of the base. At most 4 gather around a player, and
+  they despawn after 20s with nobody nearby. They are not saved across server
+  restarts. Tuning lives in `DEFAULT_MONSTER_OPTIONS` in `server/src/monsters.ts`.
+- **Encounters.** When a zombie and a player end up on the same tile (either
+  one walks onto the other), the game switches to first person. Every zombie
+  within 8 tiles joins the fight. The 3D arena is built from the real
+  overworld tiles around the encounter: 17×17 tiles, each a 4 m square
+  showing that tile's pixel art. Mountains, ruined buildings, base walls and
+  toxic water are solid; dead forests have trees; rubble and craters have
+  debris; hot zones glow and burn (4 HP/s); sludge marsh slows you down.
+  Zombies start where they stood on the overworld. Kill them all, or run past
+  the rusty posts at the arena's edge to flee: you come out up to 3 tiles that
+  way on the overworld and the survivors go back to their tiles. Die and you
+  wake up at the base. Afterwards you get 3 seconds' grace before anything can
+  catch you again.
+
+  Controls: WASD/arrows move, mouse aims, left click or Space shoots
+  (`shoot` action), Esc frees the mouse (click to recapture). The client runs
+  the fight and reports the outcome; the server checks it against the
+  encounter (only that fight's zombies can be killed, and victory needs all of
+  them), but doesn't simulate the combat itself.
 - The world map asks the server for the list of generated chunks and fetches
   the ones the client doesn't have in batches. It only shows land that exists;
   looking at the map never generates anything.
@@ -83,9 +100,10 @@ godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 -
 ```
 
 It joins, walks out of the base, opens and loads the world map, reconnects and
-checks the server kept its position. Add `--expect-zombies` to also wait for a
-zombie to appear and approach (needs a player far enough from the base and a
-generous `spawnChance`).
+checks the server kept its position. Add `--expect-encounter` to also wait for
+zombies to catch the player, check the 3D arena, shoot a zombie, win that
+fight, then flee the next one (needs a player far enough from the base and a
+server with a generous `spawnChance`).
 
 ### Adding a terrain type
 

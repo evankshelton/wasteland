@@ -1,9 +1,9 @@
 // Game server: accepts WebSocket connections, authenticates players, applies
 // movement authoritatively and streams nearby chunks and players.
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { DIR_DELTA, PROTOCOL_VERSION, parseClientMsg, validName, type ClientMsg, type ServerMsg } from "./protocol.ts";
-import { Monsters, type MonsterOptions } from "./monsters.ts";
+import { Monsters, inSafeZone, type Monster, type MonsterOptions } from "./monsters.ts";
 import type { Storage } from "./storage.ts";
 import { TILE_DEFS, isPassable } from "./tiles.ts";
 import { chunkOf, type World } from "./world.ts";
@@ -23,6 +23,17 @@ export interface ServerOptions {
   /** Milliseconds between monster updates. */
   tickMs: number;
   monsters: MonsterOptions;
+  /** Enemies within this many tiles of a contact join the encounter; the 3D arena spans it. */
+  encounterRadius: number;
+  /** After an encounter, zombies leave the player alone for this long. */
+  encounterGraceMs: number;
+}
+
+interface Encounter {
+  id: number;
+  x: number;
+  y: number;
+  enemies: Monster[];
 }
 
 interface Session {
@@ -34,6 +45,9 @@ interface Session {
   seenMonsters: Set<number>;
   lastMoveAt: number;
   dirty: boolean;
+  /** Set while the player is fighting in first person; overworld moves are refused. */
+  encounter?: Encounter;
+  graceUntil: number;
 }
 
 const log = (...args: unknown[]) => console.log(new Date().toISOString(), ...args);
@@ -44,6 +58,7 @@ export class GameServer {
   private byPlayerId = new Map<number, Session>();
   private saveTimer?: NodeJS.Timeout;
   private tickTimer?: NodeJS.Timeout;
+  private nextEncounterId = 1;
   readonly monsters: Monsters;
   private world: World;
   private storage: Storage;
@@ -94,7 +109,7 @@ export class GameServer {
 
   private onConnection(ws: WebSocket, addr: string): void {
     const s: Session = {
-      ws, addr, sentChunks: new Set(), seenPlayers: new Set(), seenMonsters: new Set(), lastMoveAt: 0, dirty: false,
+      ws, addr, sentChunks: new Set(), seenPlayers: new Set(), seenMonsters: new Set(), lastMoveAt: 0, dirty: false, graceUntil: 0,
     };
     this.sessions.add(s);
     log(`[conn] ${addr} connected`);
@@ -132,6 +147,8 @@ export class GameServer {
         return this.onMap(s);
       case "map_chunks":
         return this.onMapChunks(s, msg);
+      case "encounter_end":
+        return this.onEncounterEnd(s, msg);
     }
   }
 
@@ -191,24 +208,99 @@ export class GameServer {
 
     const now = Date.now();
     let ok = false;
-    if (now - s.lastMoveAt >= this.opts.moveIntervalMs) {
+    let contact = false;
+    if (!s.encounter && now - s.lastMoveAt >= this.opts.moveIntervalMs) {
       const [dx, dy] = DIR_DELTA[msg.dir];
       const nx = p.x + dx;
       const ny = p.y + dy;
-      if (isPassable(this.world.tileAt(nx, ny)) && !this.monsters.at(nx, ny)) {
+      const zombie = this.monsters.at(nx, ny);
+      // Walking into a zombie starts a fight, unless we only just got away from one.
+      if (isPassable(this.world.tileAt(nx, ny)) && (!zombie || now >= s.graceUntil)) {
         p.x = nx;
         p.y = ny;
         s.lastMoveAt = now;
         s.dirty = true;
         ok = true;
+        contact = zombie !== undefined;
       }
     }
     this.send(s, { t: "you", x: p.x, y: p.y, seq: msg.seq, ok });
     if (ok) {
       this.streamChunks(s);
       this.updateVisibility(s);
-      this.syncMonsters(s);
     }
+    if (contact) this.startEncounter(s);
+    else if (ok) this.syncMonsters(s);
+  }
+
+  /** Pull every zombie near the player into a first-person fight. */
+  private startEncounter(s: Session): void {
+    const p = s.player!;
+    const enemies = this.monsters.take(p, this.opts.encounterRadius);
+    const enc: Encounter = { id: this.nextEncounterId++, x: p.x, y: p.y, enemies };
+    s.encounter = enc;
+    const removed = enemies.map((m) => m.id);
+    for (const other of this.sessions) if (other.player) this.syncMonsters(other, undefined, removed);
+    log(`[encounter] "${p.name}" vs ${enemies.length} zombie(s) at (${p.x}, ${p.y})`);
+    this.send(s, {
+      t: "encounter_start",
+      id: enc.id,
+      x: enc.x,
+      y: enc.y,
+      radius: this.opts.encounterRadius,
+      seed: randomInt(1, 2 ** 31 - 1),
+      enemies: enemies.map((m) => ({ id: m.id, kind: m.kind, dx: m.x - enc.x, dy: m.y - enc.y })),
+    });
+  }
+
+  private onEncounterEnd(s: Session, msg: Extract<ClientMsg, { t: "encounter_end" }>): void {
+    const p = s.player;
+    const enc = s.encounter;
+    if (!p || !enc || msg.id !== enc.id) return; // Stale or duplicate: nothing to do.
+    const killed = new Set(msg.killed);
+    const survivors = enc.enemies.filter((m) => !killed.has(m.id));
+    if (msg.result === "victory" && survivors.length > 0) {
+      return this.fail(s, "bad_message", "Claimed victory with enemies still standing.");
+    }
+
+    if (msg.result === "fled" && msg.dir) {
+      // Come out of the fight a few tiles away in the direction we ran.
+      const [dx, dy] = DIR_DELTA[msg.dir];
+      for (let d = 3; d >= 1; d--) {
+        const nx = enc.x + dx * d;
+        const ny = enc.y + dy * d;
+        if (isPassable(this.world.tileAt(nx, ny)) && !survivors.some((m) => m.x === nx && m.y === ny) && !this.monsters.at(nx, ny)) {
+          p.x = nx;
+          p.y = ny;
+          break;
+        }
+      }
+    } else if (msg.result === "died") {
+      p.x = BASE.spawn.x;
+      p.y = BASE.spawn.y;
+    }
+
+    this.endEncounter(s, survivors);
+    s.dirty = true;
+    log(`[encounter] "${p.name}" ${msg.result} (${killed.size} killed) -> (${p.x}, ${p.y})`);
+    this.send(s, { t: "encounter_over", id: enc.id, result: msg.result, x: p.x, y: p.y });
+    this.streamChunks(s);
+    this.updateVisibility(s);
+    this.syncMonsters(s);
+  }
+
+  /** Close the encounter and put surviving zombies back where they stood. */
+  private endEncounter(s: Session, survivors: Monster[]): void {
+    s.encounter = undefined;
+    const now = Date.now();
+    s.graceUntil = now + this.opts.encounterGraceMs;
+    const players = [...this.sessions].filter((o) => o.player).map((o) => o.player!);
+    if (s.player && !this.sessions.has(s)) players.push(s.player);
+    const back = new Set<number>();
+    for (const m of survivors) {
+      if (!inSafeZone(m.x, m.y) && this.monsters.restore(m, now, players)) back.add(m.id);
+    }
+    for (const other of this.sessions) if (other.player && other !== s) this.syncMonsters(other, back);
   }
 
   /** The world map starts with the list of every generated chunk... */
@@ -229,6 +321,7 @@ export class GameServer {
 
   private onClose(s: Session): void {
     if (!this.sessions.delete(s)) return;
+    if (s.encounter) this.endEncounter(s, s.encounter.enemies);
     const p = s.player;
     if (p) {
       this.storage.savePlayers([p]);
@@ -286,10 +379,19 @@ export class GameServer {
 
   /** Advance the monsters and tell each player about changes within view. */
   private tick(): void {
+    const now = Date.now();
     const sessions = [...this.sessions].filter((s) => s.player);
-    const { changed, removed } = this.monsters.tick(Date.now(), sessions.map((s) => s.player!));
-    if (changed.size === 0 && removed.length === 0) return;
-    for (const s of sessions) this.syncMonsters(s, changed, removed);
+    const { changed, removed, contacts } = this.monsters.tick(
+      now,
+      sessions.map((s) => ({ ...s.player!, targetable: !s.encounter && now >= s.graceUntil })),
+    );
+    if (changed.size > 0 || removed.length > 0) {
+      for (const s of sessions) this.syncMonsters(s, changed, removed);
+    }
+    for (const c of contacts) {
+      const s = this.byPlayerId.get(c.playerId);
+      if (s && !s.encounter) this.startEncounter(s);
+    }
   }
 
   /**

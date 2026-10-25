@@ -1,4 +1,4 @@
-# Wasteland wire protocol (v3)
+# Wasteland wire protocol (v4)
 
 One WebSocket per player (`ws://<host>:<port>`). Every message is a UTF-8 text
 frame holding one JSON object with a `t` field naming its type.
@@ -20,6 +20,7 @@ Source of truth: `server/src/protocol.ts` (server) and `client/scripts/net.gd` (
 | `move`  | `dir` (`up`/`down`/`left`/`right`), `seq` | One step. The server always answers with `you` echoing `seq`. |
 | `map`   | — | Asks for the world map index; answered with `map_index`. |
 | `map_chunks` | `coords` (array of `[cx, cy]`, at most 256) | Fetch chunks for the world map. Answered with a `map_chunk` per chunk that has been generated (others are skipped, never generated), then `map_batch_done`. |
+| `encounter_end` | `id`, `result` (`victory`/`fled`/`died`), `killed` (monster ids), `dir`? | How the first-person fight ended. `dir` (`up`/`down`/`left`/`right`) is the arena edge the player fled across. `victory` is refused unless every enemy is in `killed`. |
 
 ## Server → client
 
@@ -33,8 +34,10 @@ Source of truth: `server/src/protocol.ts` (server) and `client/scripts/net.gd` (
 | `map_index`   | `chunks` (array of `[cx, cy]`) | Every chunk anyone has generated so far. |
 | `map_chunk`   | `cx`, `cy`, `tiles` | Same encoding as `chunk`, for the world map. It doesn't count as streamed: walking there later still sends a `chunk`. |
 | `map_batch_done` | — | Ends the reply to one `map_chunks` request; the client sends the next batch. |
-| `monster`     | `id`, `kind` (`zombie`), `x`, `y` | A monster came within view (40 tiles) or moved. Monsters block movement: a `move` onto one is refused. |
-| `monster_left`| `id` | That monster left view or despawned. |
+| `monster`     | `id`, `kind` (`zombie`), `x`, `y` | A monster came within view (40 tiles) or moved. |
+| `monster_left`| `id` | That monster left view, despawned, or was pulled into an encounter. |
+| `encounter_start` | `id`, `x`, `y`, `radius`, `seed`, `enemies[]` | A monster and the player share a tile (either one stepped onto the other). Every monster within `radius` tiles leaves the overworld and joins the fight; `enemies[]` is `{id, kind, dx, dy}` with tile offsets from `(x, y)`. The client builds a 3D arena from the overworld tiles within `radius` of `(x, y)`, decorated using `seed`. Overworld `move`s are refused until the encounter ends. |
+| `encounter_over` | `id`, `result`, `x`, `y` | The server accepted the result. `x`, `y` is where the player is now: unchanged after a victory, up to 3 tiles in the fled direction, or the base after dying. Surviving monsters are back on their tiles, and for a few seconds the player can't be caught or walk into a fight. |
 | `error`       | `code`, `message` | Sent before the server closes the socket. Codes: `version`, `bad_name`, `name_taken`, `replaced`, `bad_message`, `not_joined`, `timeout`, `server_error`. |
 
 ## Identity

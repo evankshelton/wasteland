@@ -5,11 +5,13 @@ extends Node
 ##
 ##   godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 --port 7777
 ##
-## --expect-zombies also waits for a zombie to show up and approach (needs a
-## server with a high spawn chance and a player out in the wasteland).
+## --expect-encounter also waits for zombies to catch the player, checks the
+## first-person arena, shoots a zombie, wins that fight, then waits for another
+## and flees across the arena's edge. Needs a server with a high zombie spawn
+## chance and the player far enough from the base for zombies to spawn.
 ##
 ## Without --headless it also saves screenshots (--screenshot <path>; the map
-## view goes to <path> with "_map" before the extension).
+## view goes to <path> with "_map" before the extension, the fight to "_fps").
 
 const GAME_SCENE := preload("res://scenes/game.tscn")
 
@@ -17,12 +19,12 @@ var host := "127.0.0.1"
 var port := 7777
 var player_name := "SmokeTest"
 var screenshot := ""
-var expect_zombies := false
+var expect_encounter := false
 
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
-	expect_zombies = "--expect-zombies" in args
+	expect_encounter = "--expect-encounter" in args
 	for i in args.size() - 1:
 		match args[i]:
 			"--host": host = args[i + 1]
@@ -48,23 +50,12 @@ func _run() -> void:
 	if stopped == start:
 		return _finish(false, "avatar did not move")
 
-	if expect_zombies:
-		var deadline := Time.get_ticks_msec() + 20000
-		while game.monster_positions.is_empty():
-			if Time.get_ticks_msec() > deadline:
-				return _finish(false, "no zombie appeared")
-			await get_tree().process_frame
-		var id: int = game.monster_positions.keys()[0]
-		var dist := func() -> int:
-			var d: Vector2i = game.monster_positions.get(id, Vector2i(9999, 9999)) - game.pos
-			return maxi(absi(d.x), absi(d.y))
-		var first: int = dist.call()
-		await get_tree().create_timer(4.0).timeout
-		print("zombie #%d: %d tiles away, then %d" % [id, first, dist.call()])
-		if dist.call() >= first and first > 1:
-			return _finish(false, "zombie did not approach")
-
-	await _screenshot(screenshot)
+	if expect_encounter:
+		var problem: String = await _test_encounters(game)
+		if not problem.is_empty():
+			return _finish(false, problem)
+	else:
+		await _screenshot(screenshot)
 
 	_send_action(&"open_map")
 	var map: Control = game.map_view
@@ -86,6 +77,9 @@ func _run() -> void:
 	if map.visible:
 		return _finish(false, "open_map did not close the map")
 
+	while game.encounter: # Don't leave mid-fight.
+		await get_tree().process_frame
+	var left_at: Vector2i = game.pos
 	Net.close()
 	game.queue_free()
 	await get_tree().create_timer(0.3).timeout
@@ -93,9 +87,97 @@ func _run() -> void:
 	game = await _join()
 	if game == null:
 		return
-	if game.pos != stopped:
-		return _finish(false, "rejoined at %s, expected %s" % [game.pos, stopped])
+	if game.pos != left_at:
+		return _finish(false, "rejoined at %s, expected %s" % [game.pos, left_at])
 	_finish(true, "rejoined at %s" % game.pos)
+
+
+## Returns "" on success, otherwise what went wrong.
+func _test_encounters(game: Node) -> String:
+	# 1. Stand still until a zombie catches us.
+	var enc: Node3D = await _wait_for_encounter(game)
+	if enc == null:
+		return "no zombie reached the player"
+	var center: Vector2i = game.pos
+	var terrain := {}
+	for key: String in enc._cells.values():
+		terrain[key] = terrain.get(key, 0) + 1
+	print("encounter at %s: %d zombie(s), %d arena nodes, terrain %s" % [center, enc.enemies.size(), enc.arena.get_child_count(), terrain])
+	if enc.player.global_position.y > 0.5:
+		return "player is standing on something at %s" % enc.player.global_position
+	if enc.enemies.is_empty() or enc.arena.get_child_count() < 3:
+		return "arena not built"
+	if game.terrain.visible:
+		return "overworld still showing during the fight"
+	await get_tree().create_timer(1.0).timeout
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_fps." + screenshot.get_extension())
+		enc.player.rotate_y(PI) # ...and the view behind.
+		await get_tree().create_timer(0.2).timeout
+		await _screenshot(screenshot.get_basename() + "_fps2." + screenshot.get_extension())
+
+	# 2. Step up to a zombie and shoot it for real (hitscan through the physics world).
+	var z: Zombie3D = enc.enemies.values()[0]
+	var away := -z.global_position.normalized() if z.global_position.length() > 0.1 else Vector3.BACK
+	enc.player.global_position = z.global_position + away * 3.0
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	_aim(enc, z)
+	enc.fire()
+	if z.health >= Zombie3D.MAX_HEALTH:
+		return "shot at point blank did not hit the zombie"
+	print("shot zombie #%d: health %d" % [z.monster_id, z.health])
+
+	# 3. Finish them all: victory.
+	for e: Zombie3D in enc.enemies.values():
+		e.hit(1000.0)
+	if not await _wait_for_result(game, "victory"):
+		return "victory was not confirmed by the server (got '%s')" % game.last_encounter_result
+	if not game.terrain.visible:
+		return "overworld not restored after the fight"
+	print("victory at %s" % game.pos)
+
+	# 4. Next fight: run for it, east.
+	enc = await _wait_for_encounter(game)
+	if enc == null:
+		return "no second encounter"
+	center = game.pos
+	enc.player.global_position = Vector3(enc.half_extent + 1.0, 1.0, 0.0)
+	if not await _wait_for_result(game, "fled"):
+		return "fleeing was not confirmed by the server (got '%s')" % game.last_encounter_result
+	print("fled from %s to %s" % [center, game.pos])
+	if game.pos.y != center.y or game.pos.x < center.x:
+		return "fled east but came out at %s" % game.pos
+	return ""
+
+
+func _wait_for_encounter(game: Node) -> Node3D:
+	var deadline := Time.get_ticks_msec() + 45000
+	while game.encounter == null:
+		if Time.get_ticks_msec() > deadline:
+			return null
+		await get_tree().process_frame
+	await get_tree().process_frame
+	return game.encounter
+
+
+func _wait_for_result(game: Node, want: String) -> bool:
+	game.last_encounter_result = ""
+	var deadline := Time.get_ticks_msec() + 8000
+	while game.last_encounter_result.is_empty():
+		if Time.get_ticks_msec() > deadline:
+			return false
+		await get_tree().process_frame
+	return game.last_encounter_result == want
+
+
+## Point the player's camera at a zombie's chest.
+func _aim(enc: Node3D, z: Zombie3D) -> void:
+	var eye: Vector3 = enc.camera.global_position
+	var chest := z.global_position + Vector3(0, 1.1, 0)
+	var to := chest - eye
+	enc.player.rotation.y = atan2(-to.x, -to.z)
+	enc.camera.rotation.x = atan2(to.y, Vector2(to.x, to.z).length())
 
 
 func _join() -> Node:

@@ -7,6 +7,7 @@ extends Node2D
 ## ("you") always wins.
 
 const MENU_SCENE := "res://scenes/main_menu.tscn"
+const ENCOUNTER_SCENE := preload("res://scenes/encounter.tscn")
 const TILES_TEXTURE := preload("res://assets/tiles.png")
 const SPRITES_TEXTURE := preload("res://assets/sprites.png")
 const TILE := 16
@@ -34,6 +35,8 @@ var others := {} ## player id -> Node2D
 var other_positions := {} ## player id -> Vector2i, for the world map
 var monsters := {} ## monster id -> Sprite2D
 var monster_positions := {} ## monster id -> Vector2i
+var encounter: Node3D ## the first-person fight, while one is running
+var last_encounter_result := ""
 
 var _seq := 0
 var _pending_seq := -1 ## seq of the step awaiting a reply, -1 if none
@@ -53,6 +56,7 @@ var _lost := false
 @onready var lost_overlay: Control = %LostOverlay
 @onready var lost_label: Label = %LostLabel
 @onready var map_view: Control = %MapView
+@onready var hud: CanvasLayer = $HUD
 
 
 func _ready() -> void:
@@ -95,7 +99,7 @@ func _process(delta: float) -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	# The map, when open, sees input first and closes itself on open_map / Esc.
-	if _lost:
+	if _lost or encounter:
 		return
 	if event.is_action_pressed(&"ui_cancel"):
 		_set_paused(not pause_menu.visible)
@@ -135,6 +139,15 @@ func _handle(msg: Dictionary) -> void:
 				monsters[id].queue_free()
 				monsters.erase(id)
 			monster_positions.erase(id)
+		"encounter_start":
+			_start_encounter(msg)
+		"encounter_over":
+			last_encounter_result = str(msg.result)
+			_set_pos(Vector2i(int(msg.x), int(msg.y)), true)
+			match msg.result:
+				"victory": _log("The dead lie still. You survived.")
+				"fled": _log("You got away... for now.")
+				"died": _log("You died. You wake up back at the base.")
 		"map_index":
 			map_view.on_index(msg.chunks)
 		"map_chunk":
@@ -162,6 +175,11 @@ func _apply_chunk(coord: Vector2i, data: PackedByteArray) -> void:
 
 func _on_disconnected(reason: String) -> void:
 	_lost = true
+	if encounter:
+		encounter.queue_free()
+		encounter = null
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		_show_overworld(true)
 	pause_menu.hide()
 	map_view.close()
 	lost_label.text = reason
@@ -182,7 +200,7 @@ func _update_movement(delta: float) -> void:
 		if Time.get_ticks_msec() - _pending_since_ms < MOVE_TIMEOUT_MS:
 			return
 		_pending_seq = -1 # The reply got lost; don't stall forever.
-	if _lost or pause_menu.visible or map_view.visible:
+	if _lost or pause_menu.visible or map_view.visible or encounter:
 		return
 	var action := _held_direction()
 	if action == &"":
@@ -208,9 +226,6 @@ func _step(action: StringName) -> void:
 	if tile >= 0 and not tile_passable[tile]:
 		_log("Blocked by %s." % tile_names[tile].to_lower())
 		return
-	if target in monster_positions.values():
-		_log("A zombie blocks your way!")
-		return
 	_seq += 1
 	_pending_seq = _seq
 	_pending_since_ms = Time.get_ticks_msec()
@@ -225,6 +240,38 @@ func _set_pos(p: Vector2i, snap := false) -> void:
 	if snap:
 		camera.reset_smoothing()
 	_update_status()
+
+
+# ---- encounters ----
+
+func _start_encounter(msg: Dictionary) -> void:
+	map_view.close()
+	_set_paused(false)
+	_pending_seq = -1
+	_show_overworld(false)
+	encounter = ENCOUNTER_SCENE.instantiate()
+	add_child(encounter)
+	encounter.setup(self, msg)
+	encounter.finished.connect(_on_encounter_finished.bind(int(msg.id)))
+	_log("Zombies! %d of them." % msg.enemies.size() if msg.enemies.size() != 1 else "A zombie is on you!")
+
+
+func _on_encounter_finished(result: String, killed: Array, dir: String, id: int) -> void:
+	var msg := {"t": "encounter_end", "id": id, "result": result, "killed": killed}
+	if not dir.is_empty():
+		msg.dir = dir
+	Net.send(msg)
+	encounter.queue_free()
+	encounter = null
+	_show_overworld(true)
+
+
+## The 2D overworld and the 3D fight never show at once.
+func _show_overworld(on: bool) -> void:
+	for node: CanvasItem in [terrain, players_root, monsters_root, avatar]:
+		node.visible = on
+	hud.visible = on
+	camera.enabled = on
 
 
 # ---- world queries ----

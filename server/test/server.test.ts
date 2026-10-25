@@ -23,6 +23,7 @@ async function boot(dbPath: string, monsters: Partial<MonsterOptions> = {}) {
   const server = new GameServer(world, storage, {
     host: "127.0.0.1", port, motd: "test", viewChunks: 1, viewTiles: 40, moveIntervalMs: 0, saveIntervalMs: 60_000,
     tickMs: 20, monsters: { ...DEFAULT_MONSTER_OPTIONS, spawnChance: 0, ...monsters },
+    encounterRadius: 8, encounterGraceMs: 300,
   });
   await server.start();
   return {
@@ -55,7 +56,12 @@ async function connect(port: number) {
         if (m.t === t) return m;
       }
     },
-    close: () => new Promise<void>((res) => (ws.once("close", () => res()), ws.close())),
+    close: () =>
+      new Promise<void>((res) => {
+        if (ws.readyState === ws.CLOSED) return res();
+        ws.once("close", () => res());
+        ws.close();
+      }),
   };
 }
 
@@ -72,7 +78,7 @@ test("a player's position survives reconnecting and a server restart", async () 
   let srv = await boot(db);
 
   let c = await connect(srv.port);
-  c.send({ t: "hello", v: 3, name: "Tester" });
+  c.send({ t: "hello", v: 4, name: "Tester" });
   const welcome = await c.until("welcome");
   assert.equal(welcome.x, 0);
   assert.equal(welcome.y, 0);
@@ -91,14 +97,14 @@ test("a player's position survives reconnecting and a server restart", async () 
 
   // Wrong token for an existing name is refused.
   c = await connect(srv.port);
-  c.send({ t: "hello", v: 3, name: "tester", token: "nope" });
+  c.send({ t: "hello", v: 4, name: "tester", token: "nope" });
   assert.equal((await c.until("error")).code, "name_taken");
 
   await srv.stop();
   srv = await boot(db);
 
   c = await connect(srv.port);
-  c.send({ t: "hello", v: 3, name: "Tester", token: welcome.token });
+  c.send({ t: "hello", v: 4, name: "Tester", token: welcome.token });
   const again = await c.until("welcome");
   assert.deepEqual([again.x, again.y], [0, 12]);
   await c.close();
@@ -108,10 +114,10 @@ test("a player's position survives reconnecting and a server restart", async () 
 test("nearby players see each other arrive, move and leave", async () => {
   const srv = await boot(":memory:");
   const a = await connect(srv.port);
-  a.send({ t: "hello", v: 3, name: "Alpha" });
+  a.send({ t: "hello", v: 4, name: "Alpha" });
   const wa = await a.until("welcome");
   const b = await connect(srv.port);
-  b.send({ t: "hello", v: 3, name: "Bravo" });
+  b.send({ t: "hello", v: 4, name: "Bravo" });
   const wb = await b.until("welcome");
 
   assert.equal((await b.until("player")).id, wa.id, "Bravo is told about Alpha");
@@ -130,7 +136,7 @@ test("nearby players see each other arrive, move and leave", async () => {
 test("the world map lists generated chunks and never generates new ones", async () => {
   const srv = await boot(":memory:");
   const c = await connect(srv.port);
-  c.send({ t: "hello", v: 3, name: "Mapper" });
+  c.send({ t: "hello", v: 4, name: "Mapper" });
   const welcome = await c.until("welcome");
   assert.equal(welcome.tiles[1].color, "#5c3f24", "map colours come with the tile list");
 
@@ -157,7 +163,7 @@ test("the world map lists generated chunks and never generates new ones", async 
 test("walls block movement", async () => {
   const srv = await boot(":memory:");
   const c = await connect(srv.port);
-  c.send({ t: "hello", v: 3, name: "Bumper" });
+  c.send({ t: "hello", v: 4, name: "Bumper" });
   await c.until("welcome");
   // Step off the y=0 row first: the east gate is at (8, 0).
   c.send({ t: "move", dir: "down", seq: 0 });
@@ -184,74 +190,150 @@ function addZombie(monsters: Monsters, id: number, x: number, y: number, nextSte
   monsters.all.set(id, { id, kind: "zombie", x, y, nextStepAt, lastNearPlayerAt: 0 });
 }
 
+const hunter = (x: number, y: number, targetable = true) => ({ id: 1, x, y, targetable });
+
 test("zombies spawn just off screen out in the wasteland, never near the base", () => {
   const monsters = zombieWorld({ spawnChance: 1 });
-  monsters.tick(0, [{ x: 0, y: 0 }]);
+  monsters.tick(0, [hunter(0, 0)]);
   assert.equal(monsters.all.size, 0, "nothing spawns around a player at the base");
 
-  const player = { x: 0, y: 60 };
+  const player = hunter(0, 60);
   for (let t = 0; t < 20; t++) monsters.tick(t, [player]);
   assert.equal(monsters.all.size, DEFAULT_MONSTER_OPTIONS.maxNearPlayer, "spawns stop at the cap");
   for (const m of monsters.all.values()) {
     const d = Math.max(Math.abs(m.x - player.x), Math.abs(m.y - player.y));
     assert.ok(d >= 12 && d <= 18, `zombie at (${m.x}, ${m.y}) spawned 12-18 tiles away`);
   }
+
+  const busy = zombieWorld({ spawnChance: 1 });
+  busy.tick(0, [hunter(0, 60, false)]);
+  assert.equal(busy.all.size, 0, "nothing spawns around a player who is mid-encounter");
 });
 
-test("zombies shamble slowly towards players but stop outside the base", () => {
+test("zombies shamble slowly onto players but never into the base", () => {
   // The highway south of the gate (x = 0, y = 9..32) is always walkable.
   const monsters = zombieWorld({ stepMs: 900 });
   addZombie(monsters, 1, 0, 30);
   const z = monsters.all.get(1)!;
-  const player = { x: 0, y: 12 };
+  const player = hunter(0, 12);
 
   monsters.tick(0, [player]);
   assert.equal(z.y, 29, "first step");
   monsters.tick(500, [player]);
   assert.equal(z.y, 29, "no second step before stepMs has passed");
-  for (let t = 900; t < 900 * 40; t += 900) monsters.tick(t, [player]);
-  assert.equal(z.y, 13, "stops next to the player");
+  let contact;
+  for (let t = 900; t < 900 * 40 && !contact; t += 900) contact = monsters.tick(t, [player]).contacts[0];
+  assert.deepEqual(contact, { playerId: 1, monsterId: 1 }, "reaching the player is a contact");
+  assert.equal(z.y, 12, "on the player's tile");
 
-  player.y = 9; // Player retreats to the gate.
-  for (let t = 900 * 40; t < 900 * 60; t += 900) monsters.tick(t, [player]);
-  assert.equal(z.y, 11, "won't step into the ring around the base");
+  const safe = zombieWorld();
+  addZombie(safe, 1, 0, 14);
+  const atGate = hunter(0, 9);
+  for (let t = 0; t < 900 * 20; t += 900) assert.equal(safe.tick(t, [atGate]).contacts.length, 0);
+  assert.equal(safe.all.get(1)!.y, 11, "won't step into the ring around the base");
   assert.ok(inSafeZone(0, 10) && !inSafeZone(0, 11));
+
+  const ignored = zombieWorld();
+  addZombie(ignored, 1, 0, 14);
+  for (let t = 0; t < 900 * 20; t += 900) ignored.tick(t, [hunter(0, 12, false)]);
+  assert.notEqual(ignored.all.get(1)!.y, 12, "untargetable players aren't chased onto");
 });
 
 test("zombies with nobody around eventually despawn", () => {
   const monsters = zombieWorld({ despawnAfterMs: 1000 });
   addZombie(monsters, 1, 0, 30);
-  monsters.tick(0, [{ x: 0, y: 25 }]);
+  monsters.tick(0, [hunter(0, 25)]);
   assert.equal(monsters.tick(500, []).removed.length, 0);
   assert.deepEqual(monsters.tick(1500, []).removed, [1]);
   assert.equal(monsters.all.size, 0);
 });
 
-test("clients see zombies approach, and zombies block movement", async () => {
-  const srv = await boot(":memory:", { stepMs: 50 });
-  const c = await connect(srv.port);
-  c.send({ t: "hello", v: 3, name: "Bait" });
+/** Joins and walks down the highway to (0, 12), where nothing can block the way. */
+async function walkOut(port: number, name: string) {
+  const c = await connect(port);
+  c.send({ t: "hello", v: 4, name });
   await c.until("welcome");
   for (let i = 0; i < 12; i++) {
     c.send({ t: "move", dir: "down", seq: i });
     await c.until("you");
   }
-  // Player at (0, 12) on the highway. A zombie appears to the south.
-  addZombie(srv.server.monsters, 1000, 0, 17, Date.now() + 60_000);
-  c.send({ t: "move", dir: "down", seq: 12 }); // (0, 13): moving re-syncs nearby monsters
+  return c;
+}
+
+test("clients see zombies approach, and a zombie reaching the player starts an encounter", async () => {
+  const srv = await boot(":memory:", { stepMs: 50 });
+  const c = await walkOut(srv.port, "Bait");
+  addZombie(srv.server.monsters, 1000, 0, 16, Date.now() + 60_000);
+  addZombie(srv.server.monsters, 1001, 3, 19, Date.now() + 60_000); // within 8 tiles: joins the fight
+  addZombie(srv.server.monsters, 1002, 0, 30, Date.now() + 60_000); // too far: stays on the map
+  c.send({ t: "move", dir: "up", seq: 99 }); // (0, 11): moving re-syncs nearby monsters
   await c.until("you");
-  const seen = await c.until("monster");
-  assert.deepEqual([seen.id, seen.kind, seen.x, seen.y], [1000, "zombie", 0, 17]);
+  assert.equal((await c.until("monster")).id, 1000);
 
   srv.server.monsters.all.get(1000)!.nextStepAt = 0; // Let it walk (tickMs is 20 in tests).
-  let m = seen;
-  while (m.y > 14) m = await c.until("monster");
-  assert.equal(m.y, 14, "zombie closed in to the next tile");
+  const start = await c.until("encounter_start");
+  assert.deepEqual([start.x, start.y, start.radius], [0, 11, 8]);
+  assert.deepEqual(
+    start.enemies.map((e: any) => [e.id, e.dx, e.dy]).sort(),
+    [[1000, 0, 0], [1001, 3, 8]],
+  );
+  assert.ok(!srv.server.monsters.all.has(1000) && srv.server.monsters.all.has(1002));
 
-  c.send({ t: "move", dir: "down", seq: 13 });
-  const blocked = await c.until("you");
-  assert.equal(blocked.ok, false, "can't walk into a zombie");
-  assert.equal(blocked.y, 13);
+  c.send({ t: "move", dir: "down", seq: 100 });
+  assert.equal((await c.until("you")).ok, false, "no overworld moves mid-fight");
   await c.close();
+  await srv.stop();
+});
+
+test("encounters end in victory, flight or death", async () => {
+  const srv = await boot(":memory:");
+  const c = await walkOut(srv.port, "Hero");
+  const mons = srv.server.monsters;
+
+  // Walking onto a zombie starts a fight. (Zombies here never step: nextStepAt is far off.)
+  addZombie(mons, 1, 0, 13, Date.now() + 60_000);
+  addZombie(mons, 2, 2, 16, Date.now() + 60_000);
+  c.send({ t: "move", dir: "down", seq: 1 });
+  let start = await c.until("encounter_start");
+  assert.equal(start.enemies.length, 2);
+
+  c.send({ t: "encounter_end", id: start.id, result: "victory", killed: [1, 2] });
+  let over = await c.until("encounter_over");
+  assert.deepEqual([over.result, over.x, over.y], ["victory", 0, 13]);
+  assert.equal(mons.all.size, 0, "the dead stay dead");
+
+  // Flee south: we come out 3 tiles that way and the survivor goes back to the map.
+  await new Promise((r) => setTimeout(r, 350)); // grace period
+  addZombie(mons, 3, 0, 14, Date.now() + 60_000);
+  addZombie(mons, 4, 0, 19, Date.now() + 60_000);
+  c.send({ t: "move", dir: "down", seq: 2 });
+  start = await c.until("encounter_start");
+  c.send({ t: "encounter_end", id: start.id, result: "fled", killed: [3], dir: "down" });
+  over = await c.until("encounter_over");
+  assert.deepEqual([over.result, over.x, over.y], ["fled", 0, 17]);
+  assert.deepEqual([...mons.all.keys()], [4], "survivor returned to the overworld");
+  const back = mons.all.get(4)!;
+  assert.deepEqual([back.x, back.y], [0, 19]);
+
+  // Claiming victory with zombies still standing is refused.
+  await new Promise((r) => setTimeout(r, 350));
+  mons.all.clear();
+  addZombie(mons, 5, 0, 18, Date.now() + 60_000);
+  c.send({ t: "move", dir: "down", seq: 3 });
+  start = await c.until("encounter_start");
+  c.send({ t: "encounter_end", id: start.id, result: "victory", killed: [] });
+  assert.equal((await c.until("error")).code, "bad_message", "can't claim victory with zombies standing");
+  await c.close();
+
+  // Die: back to the base.
+  const d = await walkOut(srv.port, "Doomed");
+  mons.all.clear();
+  addZombie(mons, 6, 0, 13, Date.now() + 60_000);
+  d.send({ t: "move", dir: "down", seq: 1 });
+  start = await d.until("encounter_start");
+  d.send({ t: "encounter_end", id: start.id, result: "died", killed: [] });
+  over = await d.until("encounter_over");
+  assert.deepEqual([over.result, over.x, over.y], ["died", 0, 0]);
+  await d.close();
   await srv.stop();
 });
