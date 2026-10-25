@@ -69,7 +69,7 @@ test("a player's position survives reconnecting and a server restart", async () 
   let srv = await boot(db);
 
   let c = await connect(srv.port);
-  c.send({ t: "hello", v: 1, name: "Tester" });
+  c.send({ t: "hello", v: 2, name: "Tester" });
   const welcome = await c.until("welcome");
   assert.equal(welcome.x, 0);
   assert.equal(welcome.y, 0);
@@ -88,14 +88,14 @@ test("a player's position survives reconnecting and a server restart", async () 
 
   // Wrong token for an existing name is refused.
   c = await connect(srv.port);
-  c.send({ t: "hello", v: 1, name: "tester", token: "nope" });
+  c.send({ t: "hello", v: 2, name: "tester", token: "nope" });
   assert.equal((await c.until("error")).code, "name_taken");
 
   await srv.stop();
   srv = await boot(db);
 
   c = await connect(srv.port);
-  c.send({ t: "hello", v: 1, name: "Tester", token: welcome.token });
+  c.send({ t: "hello", v: 2, name: "Tester", token: welcome.token });
   const again = await c.until("welcome");
   assert.deepEqual([again.x, again.y], [0, 12]);
   await c.close();
@@ -105,10 +105,10 @@ test("a player's position survives reconnecting and a server restart", async () 
 test("nearby players see each other arrive, move and leave", async () => {
   const srv = await boot(":memory:");
   const a = await connect(srv.port);
-  a.send({ t: "hello", v: 1, name: "Alpha" });
+  a.send({ t: "hello", v: 2, name: "Alpha" });
   const wa = await a.until("welcome");
   const b = await connect(srv.port);
-  b.send({ t: "hello", v: 1, name: "Bravo" });
+  b.send({ t: "hello", v: 2, name: "Bravo" });
   const wb = await b.until("welcome");
 
   assert.equal((await b.until("player")).id, wa.id, "Bravo is told about Alpha");
@@ -124,10 +124,37 @@ test("nearby players see each other arrive, move and leave", async () => {
   await srv.stop();
 });
 
+test("the world map lists generated chunks and never generates new ones", async () => {
+  const srv = await boot(":memory:");
+  const c = await connect(srv.port);
+  c.send({ t: "hello", v: 2, name: "Mapper" });
+  const welcome = await c.until("welcome");
+  assert.equal(welcome.tiles[1].color, "#5c3f24", "map colours come with the tile list");
+
+  c.send({ t: "map" });
+  const index = await c.until("map_index");
+  assert.equal(index.chunks.length, 9, "viewChunks=1 streams a 3x3 block around spawn");
+
+  // Ask for one generated chunk and one far away that nobody has visited.
+  c.send({ t: "map_chunks", coords: [index.chunks[0], [500, 500]] });
+  const got = await c.until("map_chunk");
+  assert.deepEqual([got.cx, got.cy], index.chunks[0]);
+  assert.equal(Buffer.from(got.tiles, "base64").length, 32 * 32);
+  await c.until("map_batch_done");
+
+  c.send({ t: "map" });
+  assert.equal((await c.until("map_index")).chunks.length, 9, "asking about (500,500) did not generate it");
+
+  c.send({ t: "map_chunks", coords: Array.from({ length: 257 }, () => [0, 0]) });
+  assert.equal((await c.until("error")).code, "bad_message", "oversized batches are refused");
+  await c.close();
+  await srv.stop();
+});
+
 test("walls block movement", async () => {
   const srv = await boot(":memory:");
   const c = await connect(srv.port);
-  c.send({ t: "hello", v: 1, name: "Bumper" });
+  c.send({ t: "hello", v: 2, name: "Bumper" });
   await c.until("welcome");
   // Step off the y=0 row first: the east gate is at (8, 0).
   c.send({ t: "move", dir: "down", seq: 0 });

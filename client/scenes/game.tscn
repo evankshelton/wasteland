@@ -1,8 +1,9 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene load_steps=5 format=3]
 
 [ext_resource type="Script" path="res://scripts/game.gd" id="1_game"]
 [ext_resource type="Texture2D" path="res://assets/sprites.png" id="2_sprites"]
 [ext_resource type="Theme" path="res://ui/theme.tres" id="3_theme"]
+[ext_resource type="Script" path="res://scripts/map_view.gd" id="4_map"]
 
 [node name="Game" type="Node2D"]
 script = ExtResource("1_game")
@@ -76,7 +77,7 @@ anchor_left = 1.0
 anchor_top = 1.0
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = -380.0
+offset_left = -520.0
 offset_top = -36.0
 offset_right = -12.0
 offset_bottom = -12.0
@@ -84,7 +85,66 @@ grow_horizontal = 0
 grow_vertical = 0
 theme_override_colors/font_color = Color(0.5, 0.5, 0.5, 1)
 theme_override_font_sizes/font_size = 14
-text = "Arrows / WASD to move    Esc for menu"
+text = "Arrows / WASD to move    M for map    Esc for menu"
+horizontal_alignment = 2
+
+[node name="MapView" type="Control" parent="HUD/Root"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("4_map")
+
+[node name="Header" type="PanelContainer" parent="HUD/Root/MapView"]
+layout_mode = 1
+anchors_preset = 10
+anchor_right = 1.0
+offset_bottom = 36.0
+grow_horizontal = 2
+
+[node name="HBox" type="HBoxContainer" parent="HUD/Root/MapView/Header"]
+layout_mode = 2
+
+[node name="Title" type="Label" parent="HUD/Root/MapView/Header/HBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.666667, 0.333333, 1)
+text = "WORLD MAP"
+
+[node name="Hint" type="Label" parent="HUD/Root/MapView/Header/HBox"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
+theme_override_font_sizes/font_size = 14
+text = "Drag / arrows: scroll    Wheel / + -: zoom    C: center    M / Esc: close"
+horizontal_alignment = 2
+
+[node name="Footer" type="PanelContainer" parent="HUD/Root/MapView"]
+layout_mode = 1
+anchors_preset = 12
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_top = -36.0
+grow_horizontal = 2
+grow_vertical = 0
+
+[node name="HBox" type="HBoxContainer" parent="HUD/Root/MapView/Footer"]
+layout_mode = 2
+
+[node name="MapInfo" type="Label" parent="HUD/Root/MapView/Footer/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_colors/font_color = Color(1, 1, 0.333333, 1)
+
+[node name="MapStatus" type="Label" parent="HUD/Root/MapView/Footer/HBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
 horizontal_alignment = 2
 
 [node name="PauseMenu" type="CenterContainer" parent="HUD/Root"]

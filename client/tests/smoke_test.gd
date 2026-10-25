@@ -1,10 +1,12 @@
 extends Node
-## End-to-end check against a running server: join, hold a movement key,
-## disconnect, rejoin, and confirm the server put us back where we stopped.
+## End-to-end check against a running server: join, hold a movement key, open
+## the world map and let it load, then disconnect, rejoin, and confirm the
+## server put us back where we stopped.
 ##
 ##   godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 --port 7777
 ##
-## Without --headless it also saves a screenshot (--screenshot <path>).
+## Without --headless it also saves screenshots (--screenshot <path>; the map
+## view goes to <path> with "_map" before the extension).
 
 const GAME_SCENE := preload("res://scenes/game.tscn")
 
@@ -41,10 +43,27 @@ func _run() -> void:
 	if stopped == start:
 		return _finish(false, "avatar did not move")
 
-	if not screenshot.is_empty() and DisplayServer.get_name() != "headless":
-		await RenderingServer.frame_post_draw
-		get_viewport().get_texture().get_image().save_png(screenshot)
-		print("screenshot saved to %s" % screenshot)
+	await _screenshot(screenshot)
+
+	_send_action(&"open_map")
+	var map: Control = game.map_view
+	var deadline := Time.get_ticks_msec() + 10000
+	await get_tree().process_frame
+	while map._awaiting_batch or not map._queue.is_empty() or map.status_label.text == "Surveying...":
+		if Time.get_ticks_msec() > deadline:
+			return _finish(false, "world map did not finish loading")
+		await get_tree().process_frame
+	if not map.visible:
+		return _finish(false, "open_map did not open the map")
+	print("map: %s" % map.status_label.text)
+	_send_action(&"map_zoom_out")
+	await get_tree().create_timer(0.2).timeout
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_map." + screenshot.get_extension())
+	_send_action(&"open_map")
+	await get_tree().process_frame
+	if map.visible:
+		return _finish(false, "open_map did not close the map")
 
 	Net.close()
 	game.queue_free()
@@ -80,6 +99,24 @@ func _hold(game: Node, action: StringName, seconds: float) -> void:
 	# Let the in-flight step settle.
 	while game._pending_seq >= 0:
 		await get_tree().process_frame
+
+
+func _send_action(action: StringName) -> void:
+	var ev := InputEventAction.new()
+	ev.action = action
+	ev.pressed = true
+	Input.parse_input_event(ev)
+	var up := InputEventAction.new()
+	up.action = action
+	Input.parse_input_event(up)
+
+
+func _screenshot(path: String) -> void:
+	if path.is_empty() or DisplayServer.get_name() == "headless":
+		return
+	await RenderingServer.frame_post_draw
+	get_viewport().get_texture().get_image().save_png(path)
+	print("screenshot saved to %s" % path)
 
 
 ## Awaits whichever signal fires first; returns [signal, first_arg].

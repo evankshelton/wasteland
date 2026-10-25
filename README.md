@@ -27,8 +27,16 @@ Options: `npm start -- --port 7777 --host 0.0.0.0 --db data/world.db --seed 1234
 
 **Client**: open `client/` in Godot 4.7 and press Play, or run
 `godot --path client`. Enter the server address, port and a name, then Connect.
-Move with the arrow keys or WASD (rebind them in *Project Settings → Input Map*:
-`move_up`, `move_down`, `move_left`, `move_right`). Esc opens the menu.
+Move with the arrow keys or WASD. Esc opens the menu.
+
+Press **M** for the world map: every part of the world any player has explored,
+one pixel per tile. Scroll by dragging or with the movement keys, zoom with
+the mouse wheel or `+`/`-`, press **C** to jump back to yourself, and M or Esc
+to close it.
+
+All keys are input actions you can rebind in *Project Settings → Input Map*:
+`move_up`, `move_down`, `move_left`, `move_right`, `open_map`, `map_zoom_in`,
+`map_zoom_out`, `map_center`.
 
 Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --autoconnect`
 
@@ -46,6 +54,9 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   saves player positions every 5 seconds, on disconnect and on shutdown.
   Reconnecting with the same name puts you back where you were.
 - Other players within 40 tiles are shown (tinted orange).
+- The world map asks the server for the list of generated chunks and fetches
+  the ones the client doesn't have in batches. It only shows land that exists;
+  looking at the map never generates anything.
 
 ## Development
 
@@ -63,10 +74,11 @@ Client end-to-end test (with a server running):
 godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 --port 7777
 ```
 
-It joins, walks out of the base, reconnects and checks the server kept its position.
+It joins, walks out of the base, opens and loads the world map, reconnects and
+checks the server kept its position.
 
 ### Adding a terrain type
 
-1. Add it to `shared/tiles.json` (next free id).
+1. Add it to `shared/tiles.json` (next free id, plus its world-map `color`).
 2. Draw it in `server/tools/make_tiles.ts` and run `npm run tiles`.
 3. Place it in `server/src/worldgen.ts` (and add an ASCII glyph in `tools/ascii_map.ts`).

@@ -41,6 +41,16 @@ export class World {
     return tiles;
   }
 
+  /** Like chunk(), but never generates: undefined if nobody has been near it yet. */
+  existingChunk(cx: number, cy: number): Uint8Array | undefined {
+    const key = keyOf(cx, cy);
+    let tiles = this.cache.get(key);
+    if (tiles) return tiles;
+    tiles = this.storage.getChunk(cx, cy);
+    if (tiles) this.cache.set(key, tiles);
+    return tiles;
+  }
+
   tileAt(x: number, y: number): number {
     const cx = chunkOf(x);
     const cy = chunkOf(y);

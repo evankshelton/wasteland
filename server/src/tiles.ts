@@ -7,6 +7,8 @@ export interface TileDef {
   key: string;
   name: string;
   passable: boolean;
+  /** Colour of this terrain on the world map. */
+  color: string;
 }
 
 const tilesPath = new URL("../../shared/tiles.json", import.meta.url);

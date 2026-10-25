@@ -21,6 +21,7 @@ export class Storage {
     getChunk: StatementSync;
     putChunk: StatementSync;
     countChunks: StatementSync;
+    chunkCoords: StatementSync;
     playerByName: StatementSync;
     insertPlayer: StatementSync;
     savePlayer: StatementSync;
@@ -59,6 +60,7 @@ export class Storage {
       getChunk: this.db.prepare("SELECT tiles FROM chunks WHERE cx = ? AND cy = ?"),
       putChunk: this.db.prepare("INSERT OR REPLACE INTO chunks (cx, cy, tiles, generated_at) VALUES (?, ?, ?, ?)"),
       countChunks: this.db.prepare("SELECT COUNT(*) AS n FROM chunks"),
+      chunkCoords: this.db.prepare("SELECT cx, cy FROM chunks"),
       playerByName: this.db.prepare("SELECT id, name, token, x, y FROM players WHERE name = ?"),
       insertPlayer: this.db.prepare("INSERT INTO players (name, token, x, y, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)"),
       savePlayer: this.db.prepare("UPDATE players SET x = ?, y = ?, last_seen = ? WHERE id = ?"),
@@ -86,6 +88,11 @@ export class Storage {
 
   chunkCount(): number {
     return (this.q.countChunks.get() as { n: number }).n;
+  }
+
+  /** Coordinates of every chunk generated so far. */
+  chunkCoords(): [number, number][] {
+    return (this.q.chunkCoords.all() as { cx: number; cy: number }[]).map((r) => [r.cx, r.cy]);
   }
 
   findPlayer(name: string): PlayerRecord | undefined {

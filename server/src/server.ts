@@ -50,7 +50,7 @@ export class GameServer {
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
-      const wss = new WebSocketServer({ host: this.opts.host, port: this.opts.port, maxPayload: 4096 });
+      const wss = new WebSocketServer({ host: this.opts.host, port: this.opts.port, maxPayload: 16 * 1024 });
       this.wss = wss;
       wss.once("listening", () => {
         log(`[server] listening on ws://${this.opts.host}:${this.opts.port} (seed ${this.world.seed}, ${this.storage.chunkCount()} chunks stored)`);
@@ -116,6 +116,10 @@ export class GameServer {
         return this.onHello(s, msg);
       case "move":
         return this.onMove(s, msg);
+      case "map":
+        return this.onMap(s);
+      case "map_chunks":
+        return this.onMapChunks(s, msg);
     }
   }
 
@@ -161,7 +165,7 @@ export class GameServer {
       x,
       y,
       chunkSize: CHUNK_SIZE,
-      tiles: TILE_DEFS.map(({ id, key, name, passable }) => ({ id, key, name, passable })),
+      tiles: TILE_DEFS.map(({ id, key, name, passable, color }) => ({ id, key, name, passable, color })),
       motd: this.opts.motd,
     });
     this.streamChunks(s);
@@ -191,6 +195,22 @@ export class GameServer {
       this.streamChunks(s);
       this.updateVisibility(s);
     }
+  }
+
+  /** The world map starts with the list of every generated chunk... */
+  private onMap(s: Session): void {
+    if (!s.player) return this.fail(s, "not_joined", "Say hello first.");
+    this.send(s, { t: "map_index", chunks: this.storage.chunkCoords() });
+  }
+
+  /** ...then fetches the ones it lacks in batches. Never generates new land. */
+  private onMapChunks(s: Session, msg: Extract<ClientMsg, { t: "map_chunks" }>): void {
+    if (!s.player) return this.fail(s, "not_joined", "Say hello first.");
+    for (const [cx, cy] of msg.coords) {
+      const tiles = this.world.existingChunk(cx, cy);
+      if (tiles) this.send(s, { t: "map_chunk", cx, cy, tiles: Buffer.from(tiles).toString("base64") });
+    }
+    this.send(s, { t: "map_batch_done" });
   }
 
   private onClose(s: Session): void {

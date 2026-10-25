@@ -1,4 +1,4 @@
-# Wasteland wire protocol (v1)
+# Wasteland wire protocol (v2)
 
 One WebSocket per player (`ws://<host>:<port>`). Every message is a UTF-8 text
 frame holding one JSON object with a `t` field naming its type.
@@ -18,16 +18,21 @@ Source of truth: `server/src/protocol.ts` (server) and `client/scripts/net.gd` (
 |---------|----------------------------------------|-------|
 | `hello` | `v` (protocol version), `name`, `token`? | First message. `name` is 2–16 of `A-Z a-z 0-9 space - _`. Omit or send `""` for `token` on a new character. |
 | `move`  | `dir` (`up`/`down`/`left`/`right`), `seq` | One step. The server always answers with `you` echoing `seq`. |
+| `map`   | — | Asks for the world map index; answered with `map_index`. |
+| `map_chunks` | `coords` (array of `[cx, cy]`, at most 256) | Fetch chunks for the world map. Answered with a `map_chunk` per chunk that has been generated (others are skipped, never generated), then `map_batch_done`. |
 
 ## Server → client
 
 | `t`           | Fields | Notes |
 |---------------|--------|-------|
-| `welcome`     | `id`, `name`, `token`, `x`, `y`, `chunkSize`, `tiles[]`, `motd` | Reply to `hello`. Store `token`: it is required to reclaim this name later. `tiles[]` is `{id, key, name, passable}`. |
+| `welcome`     | `id`, `name`, `token`, `x`, `y`, `chunkSize`, `tiles[]`, `motd` | Reply to `hello`. Store `token`: it is required to reclaim this name later. `tiles[]` is `{id, key, name, passable, color}`; `color` is the terrain's world-map colour. |
 | `chunk`       | `cx`, `cy`, `tiles` | `tiles` is base64 of `chunkSize²` bytes, row-major (`index = ly*chunkSize + lx`). Sent for every chunk within 2 chunks of the player that this connection hasn't received yet. |
 | `you`         | `x`, `y`, `seq`, `ok` | Authoritative position after a `move`. `ok: false` means the step was refused (blocked or too fast). |
 | `player`      | `id`, `name`, `x`, `y` | Another player is within view (40 tiles) or moved. |
 | `player_left` | `id` | That player left view or disconnected. |
+| `map_index`   | `chunks` (array of `[cx, cy]`) | Every chunk anyone has generated so far. |
+| `map_chunk`   | `cx`, `cy`, `tiles` | Same encoding as `chunk`, for the world map. It doesn't count as streamed: walking there later still sends a `chunk`. |
+| `map_batch_done` | — | Ends the reply to one `map_chunks` request; the client sends the next batch. |
 | `error`       | `code`, `message` | Sent before the server closes the socket. Codes: `version`, `bad_name`, `name_taken`, `replaced`, `bad_message`, `not_joined`, `timeout`, `server_error`. |
 
 ## Identity

@@ -29,6 +29,7 @@ var tile_names: Array[String] = []
 var tile_passable: Array[bool] = []
 var chunks := {} ## Vector2i chunk coord -> PackedByteArray of tile ids
 var others := {} ## player id -> Node2D
+var other_positions := {} ## player id -> Vector2i, for the world map
 
 var _seq := 0
 var _pending_seq := -1 ## seq of the step awaiting a reply, -1 if none
@@ -46,6 +47,7 @@ var _lost := false
 @onready var pause_menu: Control = %PauseMenu
 @onready var lost_overlay: Control = %LostOverlay
 @onready var lost_label: Label = %LostLabel
+@onready var map_view: Control = %MapView
 
 
 func _ready() -> void:
@@ -63,6 +65,7 @@ func _ready() -> void:
 		tile_names[id] = str(t.name)
 		tile_passable[id] = bool(t.passable)
 	terrain.tile_set = _build_tileset(tile_names.size())
+	map_view.setup(self, welcome.tiles)
 
 	%ResumeButton.pressed.connect(_set_paused.bind(false))
 	%DisconnectButton.pressed.connect(_leave)
@@ -83,8 +86,14 @@ func _process(delta: float) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed(&"ui_cancel") and not _lost:
+	# The map, when open, sees input first and closes itself on open_map / Esc.
+	if _lost:
+		return
+	if event.is_action_pressed(&"ui_cancel"):
 		_set_paused(not pause_menu.visible)
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed(&"open_map") and not pause_menu.visible:
+		map_view.open()
 		get_viewport().set_input_as_handled()
 
 
@@ -109,6 +118,17 @@ func _handle(msg: Dictionary) -> void:
 			if others.has(id):
 				others[id].queue_free()
 				others.erase(id)
+			other_positions.erase(id)
+		"map_index":
+			map_view.on_index(msg.chunks)
+		"map_chunk":
+			var coord := Vector2i(int(msg.cx), int(msg.cy))
+			var data := Marshalls.base64_to_raw(msg.tiles)
+			if data.size() == chunk_size * chunk_size and not chunks.has(coord):
+				chunks[coord] = data # Map only; the server streams it as a "chunk" if we walk there.
+			map_view.on_chunk()
+		"map_batch_done":
+			map_view.on_batch_done()
 
 
 func _apply_chunk(coord: Vector2i, data: PackedByteArray) -> void:
@@ -120,13 +140,14 @@ func _apply_chunk(coord: Vector2i, data: PackedByteArray) -> void:
 	for i in data.size():
 		@warning_ignore("integer_division")
 		terrain.set_cell(origin + Vector2i(i % chunk_size, i / chunk_size), 0, Vector2i(data[i], 0))
-	if coord == _chunk_of(pos):
+	if coord == chunk_of(pos):
 		_update_status()
 
 
 func _on_disconnected(reason: String) -> void:
 	_lost = true
 	pause_menu.hide()
+	map_view.close()
 	lost_label.text = reason
 	lost_overlay.show()
 	%BackButton.grab_focus()
@@ -145,7 +166,7 @@ func _update_movement(delta: float) -> void:
 		if Time.get_ticks_msec() - _pending_since_ms < MOVE_TIMEOUT_MS:
 			return
 		_pending_seq = -1 # The reply got lost; don't stall forever.
-	if _lost or pause_menu.visible:
+	if _lost or pause_menu.visible or map_view.visible:
 		return
 	var action := _held_direction()
 	if action == &"":
@@ -189,13 +210,13 @@ func _set_pos(p: Vector2i, snap := false) -> void:
 
 # ---- world queries ----
 
-func _chunk_of(p: Vector2i) -> Vector2i:
+func chunk_of(p: Vector2i) -> Vector2i:
 	return Vector2i(floori(float(p.x) / chunk_size), floori(float(p.y) / chunk_size))
 
 
 ## Tile id at a world position, or -1 if that chunk hasn't arrived yet.
 func tile_at(p: Vector2i) -> int:
-	var c := _chunk_of(p)
+	var c := chunk_of(p)
 	var data: PackedByteArray = chunks.get(c, PackedByteArray())
 	if data.is_empty():
 		return -1
@@ -243,6 +264,7 @@ func _upsert_player(id: int, player_name: String, p: Vector2i) -> void:
 		players_root.add_child(node)
 		others[id] = node
 	node.position = _tile_center(p)
+	other_positions[id] = p
 
 
 func _update_status() -> void:
