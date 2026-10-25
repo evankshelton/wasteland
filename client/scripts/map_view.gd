@@ -1,7 +1,7 @@
 extends Control
 ## Full-screen world map: every chunk the server has generated so far, drawn at
 ## one coloured pixel per tile (scaled by zoom), with the player, other players
-## in view and the base marked.
+## and zombies in view, and the base marked.
 ##
 ## Opening it asks the server for the chunk index, then fetches the chunks this
 ## client doesn't have yet in batches. Chunk data never changes, so each chunk
@@ -18,6 +18,7 @@ const BACKGROUND := Color(0.02, 0.02, 0.02)
 const GRID_COLOR := Color(1, 1, 1, 0.05)
 const PLAYER_COLOR := Color(1, 1, 0.33)
 const OTHER_COLOR := Color(1.0, 0.6, 0.3)
+const ZOMBIE_COLOR := Color(0.33, 1.0, 0.33)
 
 var game: Node ## the game.gd scene that owns the chunk data
 var _center := Vector2.ZERO ## world tile position at the middle of the screen
@@ -193,6 +194,11 @@ func _draw() -> void:
 		var p := _world_to_screen(Vector2(game.other_positions[id]) + Vector2(0.5, 0.5))
 		draw_circle(p, marker * 0.5 + 1.0, Color.BLACK)
 		draw_circle(p, marker * 0.5, OTHER_COLOR)
+
+	for id: int in game.monster_positions:
+		var p := _world_to_screen(Vector2(game.monster_positions[id]) + Vector2(0.5, 0.5))
+		draw_rect(Rect2(p - Vector2(marker, marker) * 0.35, Vector2(marker, marker) * 0.7).grow(1.0), Color.BLACK)
+		draw_rect(Rect2(p - Vector2(marker, marker) * 0.35, Vector2(marker, marker) * 0.7), ZOMBIE_COLOR)
 
 	# The player: a blinking square with crosshairs so it's findable when zoomed out.
 	var me := _world_to_screen(Vector2(game.pos) + Vector2(0.5, 0.5))

@@ -54,6 +54,14 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   saves player positions every 5 seconds, on disconnect and on shutdown.
   Reconnecting with the same name puts you back where you were.
 - Other players within 40 tiles are shown (tinted orange).
+- **Radioactive zombies** spawn out in the wasteland, 12–18 tiles from a player
+  (just off screen), more readily in hot zones. They shamble one tile every
+  0.9s (players are about 7× faster) towards the nearest player within 20
+  tiles, block movement, and can't enter the base or the ring just outside
+  its walls. Nothing spawns within 16 tiles of the base. At most 4 gather
+  around a player, and they despawn after 20s with nobody nearby. They are not
+  saved across server restarts, and don't attack yet. Tuning lives in
+  `DEFAULT_MONSTER_OPTIONS` in `server/src/monsters.ts`.
 - The world map asks the server for the list of generated chunks and fetches
   the ones the client doesn't have in batches. It only shows land that exists;
   looking at the map never generates anything.
@@ -75,7 +83,9 @@ godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 -
 ```
 
 It joins, walks out of the base, opens and loads the world map, reconnects and
-checks the server kept its position.
+checks the server kept its position. Add `--expect-zombies` to also wait for a
+zombie to appear and approach (needs a player far enough from the base and a
+generous `spawnChance`).
 
 ### Adding a terrain type
 

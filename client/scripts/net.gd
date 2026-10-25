@@ -9,7 +9,7 @@ extends Node
 signal joined(welcome: Dictionary)
 signal disconnected(reason: String)
 
-const PROTOCOL_VERSION := 2
+const PROTOCOL_VERSION := 3
 const CONNECT_TIMEOUT_MS := 8000
 
 ## The server's welcome message while joined, otherwise empty.

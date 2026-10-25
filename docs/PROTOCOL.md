@@ -1,4 +1,4 @@
-# Wasteland wire protocol (v2)
+# Wasteland wire protocol (v3)
 
 One WebSocket per player (`ws://<host>:<port>`). Every message is a UTF-8 text
 frame holding one JSON object with a `t` field naming its type.
@@ -33,6 +33,8 @@ Source of truth: `server/src/protocol.ts` (server) and `client/scripts/net.gd` (
 | `map_index`   | `chunks` (array of `[cx, cy]`) | Every chunk anyone has generated so far. |
 | `map_chunk`   | `cx`, `cy`, `tiles` | Same encoding as `chunk`, for the world map. It doesn't count as streamed: walking there later still sends a `chunk`. |
 | `map_batch_done` | — | Ends the reply to one `map_chunks` request; the client sends the next batch. |
+| `monster`     | `id`, `kind` (`zombie`), `x`, `y` | A monster came within view (40 tiles) or moved. Monsters block movement: a `move` onto one is refused. |
+| `monster_left`| `id` | That monster left view or despawned. |
 | `error`       | `code`, `message` | Sent before the server closes the socket. Codes: `version`, `bad_name`, `name_taken`, `replaced`, `bad_message`, `not_joined`, `timeout`, `server_error`. |
 
 ## Identity

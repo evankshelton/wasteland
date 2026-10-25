@@ -13,6 +13,8 @@ const TILE := 16
 const MOVE_REPEAT := 0.13 ## seconds between steps while a key is held
 const MOVE_TIMEOUT_MS := 2000
 const OTHER_TINT := Color(1.0, 0.6, 0.3)
+const ZOMBIE_REGION := Rect2(16, 0, 16, 16) ## sprites.png column 1
+const ZOMBIE_STEP_TIME := 0.35 ## seconds to animate one shambling step
 const LOG_LINES := 6
 
 ## Input action -> [protocol direction, tile delta]. Rebind keys in Project Settings > Input Map.
@@ -30,6 +32,8 @@ var tile_passable: Array[bool] = []
 var chunks := {} ## Vector2i chunk coord -> PackedByteArray of tile ids
 var others := {} ## player id -> Node2D
 var other_positions := {} ## player id -> Vector2i, for the world map
+var monsters := {} ## monster id -> Sprite2D
+var monster_positions := {} ## monster id -> Vector2i
 
 var _seq := 0
 var _pending_seq := -1 ## seq of the step awaiting a reply, -1 if none
@@ -40,6 +44,7 @@ var _lost := false
 
 @onready var terrain: TileMapLayer = %Terrain
 @onready var players_root: Node2D = %Players
+@onready var monsters_root: Node2D = %Monsters
 @onready var avatar: Sprite2D = %Avatar
 @onready var camera: Camera2D = %Camera
 @onready var status_label: Label = %StatusLabel
@@ -83,6 +88,9 @@ func _process(delta: float) -> void:
 	for msg in Net.drain():
 		_handle(msg)
 	_update_movement(delta)
+	# Radioactive glow: pulse the zombies' brightness.
+	var glow := 0.8 + 0.2 * sin(Time.get_ticks_msec() / 220.0)
+	monsters_root.modulate = Color(glow, 1.0, glow)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -119,6 +127,14 @@ func _handle(msg: Dictionary) -> void:
 				others[id].queue_free()
 				others.erase(id)
 			other_positions.erase(id)
+		"monster":
+			_upsert_monster(int(msg.id), Vector2i(int(msg.x), int(msg.y)))
+		"monster_left":
+			var id := int(msg.id)
+			if monsters.has(id):
+				monsters[id].queue_free()
+				monsters.erase(id)
+			monster_positions.erase(id)
 		"map_index":
 			map_view.on_index(msg.chunks)
 		"map_chunk":
@@ -191,6 +207,9 @@ func _step(action: StringName) -> void:
 	var tile := tile_at(target)
 	if tile >= 0 and not tile_passable[tile]:
 		_log("Blocked by %s." % tile_names[tile].to_lower())
+		return
+	if target in monster_positions.values():
+		_log("A zombie blocks your way!")
 		return
 	_seq += 1
 	_pending_seq = _seq
@@ -265,6 +284,31 @@ func _upsert_player(id: int, player_name: String, p: Vector2i) -> void:
 		others[id] = node
 	node.position = _tile_center(p)
 	other_positions[id] = p
+
+
+func _upsert_monster(id: int, p: Vector2i) -> void:
+	var sprite: Sprite2D = monsters.get(id)
+	if sprite == null:
+		if monsters.is_empty():
+			_log("A radioactive zombie shambles out of the waste...")
+		sprite = Sprite2D.new()
+		sprite.texture = SPRITES_TEXTURE
+		sprite.region_enabled = true
+		sprite.region_rect = ZOMBIE_REGION
+		sprite.position = _tile_center(p)
+		sprite.flip_h = p.x > pos.x # The art reaches right; face the player.
+		monsters_root.add_child(sprite)
+		monsters[id] = sprite
+	else:
+		var old: Vector2i = monster_positions.get(id, p)
+		if p.x != old.x:
+			sprite.flip_h = p.x < old.x
+		if sprite.has_meta(&"tween"):
+			(sprite.get_meta(&"tween") as Tween).kill()
+		var tween := sprite.create_tween()
+		tween.tween_property(sprite, ^"position", _tile_center(p), ZOMBIE_STEP_TIME)
+		sprite.set_meta(&"tween", tween)
+	monster_positions[id] = p
 
 
 func _update_status() -> void:

@@ -5,6 +5,9 @@ extends Node
 ##
 ##   godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 --port 7777
 ##
+## --expect-zombies also waits for a zombie to show up and approach (needs a
+## server with a high spawn chance and a player out in the wasteland).
+##
 ## Without --headless it also saves screenshots (--screenshot <path>; the map
 ## view goes to <path> with "_map" before the extension).
 
@@ -14,10 +17,12 @@ var host := "127.0.0.1"
 var port := 7777
 var player_name := "SmokeTest"
 var screenshot := ""
+var expect_zombies := false
 
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
+	expect_zombies = "--expect-zombies" in args
 	for i in args.size() - 1:
 		match args[i]:
 			"--host": host = args[i + 1]
@@ -42,6 +47,22 @@ func _run() -> void:
 	print("walked to %s, %d chunks loaded" % [stopped, game.chunks.size()])
 	if stopped == start:
 		return _finish(false, "avatar did not move")
+
+	if expect_zombies:
+		var deadline := Time.get_ticks_msec() + 20000
+		while game.monster_positions.is_empty():
+			if Time.get_ticks_msec() > deadline:
+				return _finish(false, "no zombie appeared")
+			await get_tree().process_frame
+		var id: int = game.monster_positions.keys()[0]
+		var dist := func() -> int:
+			var d: Vector2i = game.monster_positions.get(id, Vector2i(9999, 9999)) - game.pos
+			return maxi(absi(d.x), absi(d.y))
+		var first: int = dist.call()
+		await get_tree().create_timer(4.0).timeout
+		print("zombie #%d: %d tiles away, then %d" % [id, first, dist.call()])
+		if dist.call() >= first and first > 1:
+			return _finish(false, "zombie did not approach")
 
 	await _screenshot(screenshot)
 

@@ -3,6 +3,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { DIR_DELTA, PROTOCOL_VERSION, parseClientMsg, validName, type ClientMsg, type ServerMsg } from "./protocol.ts";
+import { Monsters, type MonsterOptions } from "./monsters.ts";
 import type { Storage } from "./storage.ts";
 import { TILE_DEFS, isPassable } from "./tiles.ts";
 import { chunkOf, type World } from "./world.ts";
@@ -19,6 +20,9 @@ export interface ServerOptions {
   /** Minimum milliseconds between accepted moves for one player. */
   moveIntervalMs: number;
   saveIntervalMs: number;
+  /** Milliseconds between monster updates. */
+  tickMs: number;
+  monsters: MonsterOptions;
 }
 
 interface Session {
@@ -27,6 +31,7 @@ interface Session {
   player?: { id: number; name: string; x: number; y: number };
   sentChunks: Set<string>;
   seenPlayers: Set<number>;
+  seenMonsters: Set<number>;
   lastMoveAt: number;
   dirty: boolean;
 }
@@ -38,6 +43,8 @@ export class GameServer {
   private sessions = new Set<Session>();
   private byPlayerId = new Map<number, Session>();
   private saveTimer?: NodeJS.Timeout;
+  private tickTimer?: NodeJS.Timeout;
+  readonly monsters: Monsters;
   private world: World;
   private storage: Storage;
   private opts: ServerOptions;
@@ -46,6 +53,7 @@ export class GameServer {
     this.world = world;
     this.storage = storage;
     this.opts = opts;
+    this.monsters = new Monsters(world, opts.monsters);
   }
 
   start(): Promise<void> {
@@ -59,11 +67,13 @@ export class GameServer {
       wss.once("error", reject);
       wss.on("connection", (ws, req) => this.onConnection(ws, req.socket.remoteAddress ?? "?"));
       this.saveTimer = setInterval(() => this.flush(), this.opts.saveIntervalMs);
+      this.tickTimer = setInterval(() => this.tick(), this.opts.tickMs);
     });
   }
 
   async stop(): Promise<void> {
     clearInterval(this.saveTimer);
+    clearInterval(this.tickTimer);
     this.flush(true);
     // Detach sessions before closing sockets: their close events arrive after
     // storage may already be closed, and must not try to save again.
@@ -83,7 +93,9 @@ export class GameServer {
   }
 
   private onConnection(ws: WebSocket, addr: string): void {
-    const s: Session = { ws, addr, sentChunks: new Set(), seenPlayers: new Set(), lastMoveAt: 0, dirty: false };
+    const s: Session = {
+      ws, addr, sentChunks: new Set(), seenPlayers: new Set(), seenMonsters: new Set(), lastMoveAt: 0, dirty: false,
+    };
     this.sessions.add(s);
     log(`[conn] ${addr} connected`);
 
@@ -170,6 +182,7 @@ export class GameServer {
     });
     this.streamChunks(s);
     this.updateVisibility(s);
+    this.syncMonsters(s);
   }
 
   private onMove(s: Session, msg: Extract<ClientMsg, { t: "move" }>): void {
@@ -182,7 +195,7 @@ export class GameServer {
       const [dx, dy] = DIR_DELTA[msg.dir];
       const nx = p.x + dx;
       const ny = p.y + dy;
-      if (isPassable(this.world.tileAt(nx, ny))) {
+      if (isPassable(this.world.tileAt(nx, ny)) && !this.monsters.at(nx, ny)) {
         p.x = nx;
         p.y = ny;
         s.lastMoveAt = now;
@@ -194,6 +207,7 @@ export class GameServer {
     if (ok) {
       this.streamChunks(s);
       this.updateVisibility(s);
+      this.syncMonsters(s);
     }
   }
 
@@ -266,6 +280,36 @@ export class GameServer {
       } else {
         if (other.seenPlayers.delete(p.id)) this.send(other, { t: "player_left", id: p.id });
         if (s.seenPlayers.delete(q.id)) this.send(s, { t: "player_left", id: q.id });
+      }
+    }
+  }
+
+  /** Advance the monsters and tell each player about changes within view. */
+  private tick(): void {
+    const sessions = [...this.sessions].filter((s) => s.player);
+    const { changed, removed } = this.monsters.tick(Date.now(), sessions.map((s) => s.player!));
+    if (changed.size === 0 && removed.length === 0) return;
+    for (const s of sessions) this.syncMonsters(s, changed, removed);
+  }
+
+  /**
+   * Send monsters in view that this client hasn't seen or that changed, and
+   * forget ones that left view or were removed.
+   */
+  private syncMonsters(s: Session, changed?: Set<number>, removed: number[] = []): void {
+    const p = s.player!;
+    for (const id of removed) {
+      if (s.seenMonsters.delete(id)) this.send(s, { t: "monster_left", id });
+    }
+    for (const m of this.monsters.all.values()) {
+      const near = Math.max(Math.abs(m.x - p.x), Math.abs(m.y - p.y)) <= this.opts.viewTiles;
+      if (near) {
+        if (!s.seenMonsters.has(m.id) || changed?.has(m.id)) {
+          this.send(s, { t: "monster", id: m.id, kind: m.kind, x: m.x, y: m.y });
+          s.seenMonsters.add(m.id);
+        }
+      } else if (s.seenMonsters.delete(m.id)) {
+        this.send(s, { t: "monster_left", id: m.id });
       }
     }
   }

@@ -1,5 +1,6 @@
 // Entry point: `npm start -- --port 7777 --db data/world.db`
 import { parseArgs } from "node:util";
+import { DEFAULT_MONSTER_OPTIONS } from "./monsters.ts";
 import { GameServer } from "./server.ts";
 import { Storage } from "./storage.ts";
 import { World } from "./world.ts";
@@ -44,6 +45,8 @@ const server = new GameServer(world, storage, {
   viewTiles: 40,
   moveIntervalMs: 60,
   saveIntervalMs: 5_000,
+  tickMs: 250,
+  monsters: DEFAULT_MONSTER_OPTIONS,
 });
 
 await server.start();

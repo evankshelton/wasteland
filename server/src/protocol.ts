@@ -1,7 +1,7 @@
 // Wire protocol: one JSON object per WebSocket text message, discriminated by `t`.
 // Keep in sync with client/scripts/net.gd and docs/PROTOCOL.md.
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** Most chunk coordinates a client may ask for in one map_chunks request. */
 export const MAP_BATCH_MAX = 256;
@@ -42,6 +42,8 @@ export type ServerMsg =
   | { t: "map_index"; chunks: [number, number][] } // every chunk generated so far
   | { t: "map_chunk"; cx: number; cy: number; tiles: string } // like chunk, but for the world map only
   | { t: "map_batch_done" }
+  | { t: "monster"; id: number; kind: string; x: number; y: number } // appeared in view or moved
+  | { t: "monster_left"; id: number }
   | { t: "error"; code: string; message: string };
 
 const NAME_RE = /^[A-Za-z0-9 _-]{2,16}$/;
