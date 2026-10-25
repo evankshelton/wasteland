@@ -1,0 +1,162 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/game.gd" id="1_game"]
+[ext_resource type="Texture2D" path="res://assets/sprites.png" id="2_sprites"]
+[ext_resource type="Theme" path="res://ui/theme.tres" id="3_theme"]
+
+[node name="Game" type="Node2D"]
+script = ExtResource("1_game")
+
+[node name="Terrain" type="TileMapLayer" parent="."]
+unique_name_in_owner = true
+
+[node name="Players" type="Node2D" parent="."]
+unique_name_in_owner = true
+z_index = 1
+
+[node name="Avatar" type="Sprite2D" parent="."]
+unique_name_in_owner = true
+z_index = 2
+texture = ExtResource("2_sprites")
+region_enabled = true
+region_rect = Rect2(0, 0, 16, 16)
+
+[node name="Camera" type="Camera2D" parent="Avatar"]
+unique_name_in_owner = true
+zoom = Vector2(3, 3)
+position_smoothing_enabled = true
+position_smoothing_speed = 14.0
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Root" type="Control" parent="HUD"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme = ExtResource("3_theme")
+
+[node name="StatusPanel" type="PanelContainer" parent="HUD/Root"]
+layout_mode = 1
+offset_left = 12.0
+offset_top = 12.0
+offset_right = 52.0
+offset_bottom = 44.0
+
+[node name="StatusLabel" type="Label" parent="HUD/Root/StatusPanel"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 1, 0.333333, 1)
+
+[node name="LogPanel" type="PanelContainer" parent="HUD/Root"]
+layout_mode = 1
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 12.0
+offset_top = -12.0
+offset_right = 532.0
+offset_bottom = -12.0
+grow_vertical = 0
+
+[node name="LogLabel" type="Label" parent="HUD/Root/LogPanel"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 8
+theme_override_font_sizes/font_size = 16
+autowrap_mode = 3
+
+[node name="Hint" type="Label" parent="HUD/Root"]
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -380.0
+offset_top = -36.0
+offset_right = -12.0
+offset_bottom = -12.0
+grow_horizontal = 0
+grow_vertical = 0
+theme_override_colors/font_color = Color(0.5, 0.5, 0.5, 1)
+theme_override_font_sizes/font_size = 14
+text = "Arrows / WASD to move    Esc for menu"
+horizontal_alignment = 2
+
+[node name="PauseMenu" type="CenterContainer" parent="HUD/Root"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Panel" type="PanelContainer" parent="HUD/Root/PauseMenu"]
+custom_minimum_size = Vector2(280, 0)
+layout_mode = 2
+
+[node name="VBox" type="VBoxContainer" parent="HUD/Root/PauseMenu/Panel"]
+layout_mode = 2
+theme_override_constants/separation = 10
+
+[node name="Title" type="Label" parent="HUD/Root/PauseMenu/Panel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.666667, 0.333333, 1)
+text = "- MENU -"
+horizontal_alignment = 1
+
+[node name="ResumeButton" type="Button" parent="HUD/Root/PauseMenu/Panel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Resume"
+
+[node name="DisconnectButton" type="Button" parent="HUD/Root/PauseMenu/Panel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Disconnect"
+
+[node name="QuitButton" type="Button" parent="HUD/Root/PauseMenu/Panel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Quit to desktop"
+
+[node name="LostOverlay" type="CenterContainer" parent="HUD/Root"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Panel" type="PanelContainer" parent="HUD/Root/LostOverlay"]
+custom_minimum_size = Vector2(420, 0)
+layout_mode = 2
+
+[node name="VBox" type="VBoxContainer" parent="HUD/Root/LostOverlay/Panel"]
+layout_mode = 2
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="HUD/Root/LostOverlay/Panel/VBox"]
+layout_mode = 2
+theme_override_colors/font_color = Color(1, 0.333333, 0.333333, 1)
+text = "DISCONNECTED"
+horizontal_alignment = 1
+
+[node name="LostLabel" type="Label" parent="HUD/Root/LostOverlay/Panel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+horizontal_alignment = 1
+autowrap_mode = 3
+
+[node name="BackButton" type="Button" parent="HUD/Root/LostOverlay/Panel/VBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Back to menu"

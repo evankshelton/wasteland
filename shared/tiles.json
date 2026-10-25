@@ -1,0 +1,23 @@
+{
+  "_comment": "Single source of truth for terrain. The id is the byte stored in chunk data and the column index in client/assets/tiles.png.",
+  "tileSize": 16,
+  "tiles": [
+    { "id": 0,  "key": "void",        "name": "Unknown",          "passable": false },
+    { "id": 1,  "key": "wasteland",   "name": "Wasteland",        "passable": true  },
+    { "id": 2,  "key": "scrub",       "name": "Dead Scrub",       "passable": true  },
+    { "id": 3,  "key": "dead_forest", "name": "Dead Forest",      "passable": true  },
+    { "id": 4,  "key": "rubble",      "name": "Rubble",           "passable": true  },
+    { "id": 5,  "key": "ruins",       "name": "Ruined Building",  "passable": false },
+    { "id": 6,  "key": "road",        "name": "Cracked Highway",  "passable": true  },
+    { "id": 7,  "key": "hills",       "name": "Hills",            "passable": true  },
+    { "id": 8,  "key": "mountains",   "name": "Mountains",        "passable": false },
+    { "id": 9,  "key": "crater",      "name": "Blast Crater",     "passable": true  },
+    { "id": 10, "key": "radiation",   "name": "Hot Zone",         "passable": true  },
+    { "id": 11, "key": "water",       "name": "Toxic Water",      "passable": false },
+    { "id": 12, "key": "swamp",       "name": "Sludge Marsh",     "passable": true  },
+    { "id": 13, "key": "dunes",       "name": "Ash Dunes",        "passable": true  },
+    { "id": 14, "key": "base_wall",   "name": "Base Wall",        "passable": false },
+    { "id": 15, "key": "base_floor",  "name": "Base",             "passable": true  },
+    { "id": 16, "key": "base_gate",   "name": "Base Gate",        "passable": true  }
+  ]
+}

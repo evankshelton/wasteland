@@ -1,0 +1,13 @@
+# Godot
+client/.godot/
+client/export/
+*.translation
+
+# Server
+server/node_modules/
+server/data/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/

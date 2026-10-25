@@ -1,0 +1,26 @@
+{
+  "name": "wasteland-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Authoritative world server for Wasteland: generates, persists and streams the overworld.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "dev": "node --disable-warning=ExperimentalWarning --watch src/main.ts",
+    "map": "node --disable-warning=ExperimentalWarning tools/ascii_map.ts",
+    "tiles": "node --disable-warning=ExperimentalWarning tools/make_tiles.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.12",
+    "typescript": "^5.9.0"
+  }
+}
