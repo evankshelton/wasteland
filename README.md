@@ -105,6 +105,37 @@ zombies to catch the player, check the 3D arena, shoot a zombie, win that
 fight, then flee the next one (needs a player far enough from the base and a
 server with a generous `spawnChance`).
 
+### Zombie model
+
+The first-person zombies use a rigged, animated 3D model when one is present,
+and fall back to simple block figures otherwise. The model files live in
+`client/models/`, which is git-ignored, so each developer adds their own:
+
+```
+client/models/zombie/
+  mesh/zombie.obj, zombie.mtl, zombie_basecolor.jpg   unrigged model (unzip zombie.zip here)
+  animations/*.fbx                                    Mixamo animations for that model,
+                                                      exported "without skin"
+```
+
+Mixamo's "without skin" FBX carries the skeleton fitted to the model but no
+mesh, so a bake step skins the OBJ to that skeleton and saves everything as
+`client/models/zombie/zombie_rigged.scn`:
+
+```bash
+godot --headless --path client --import
+```
+
+```bash
+godot --headless --path client -s res://tools/rig_zombie.gd
+```
+
+Re-run it after changing the model or adding animations. Animations are named
+after their FBX files and matched by name: one with "walk" in it is the
+shamble (required), "attack"/"punch"/"bite" plays when a zombie claws you, and
+"death"/"dying" when it dies. Without those two, the zombie lunges and topples
+instead.
+
 ### Adding a terrain type
 
 1. Add it to `shared/tiles.json` (next free id, plus its world-map `color`).

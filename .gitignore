@@ -1,6 +1,8 @@
 # Godot
 client/.godot/
 client/export/
+# Third-party 3D models and animations (see README: Zombie model)
+client/models/
 *.translation
 
 # Server
