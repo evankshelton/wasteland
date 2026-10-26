@@ -172,9 +172,11 @@ instead.
 
 Dead forests in the first-person arena use tree models when there are any in
 `client/models/trees/` (git-ignored): every `.glb` there is a candidate, and
-each tree picks one at random, turned, leaning slightly and sized between 4 and
-8 m tall. Models can be any size; they're scaled by their height. Without any,
-the arena falls back to simple stick trees.
+each tree picks one at random, turned, leaning slightly and 8–16 m tall
+(snapped to five sizes). Trees stand at least 7 m apart and keep clear of where
+anyone starts. Each one collides using its own mesh, so trunks, roots and
+branches stop players, zombies and bullets. Models can be any size; they're
+scaled by their height. Without any, the arena falls back to simple stick trees.
 
 To look at an arena of one terrain without running a server:
 
@@ -182,7 +184,9 @@ To look at an arena of one terrain without running a server:
 godot --path client res://tests/arena_preview.tscn -- --terrain dead_forest --screenshot out.png
 ```
 
-It prints fps and draw calls after a few seconds, saves the screenshot, and quits.
+It prints fps and draw calls after a few seconds, saves the screenshot, and
+quits. Add `--check-trees` to also shoot the nearest tree and walk into it; it
+exits with code 1 if either passes through.
 
 ### Adding a terrain type
 

@@ -21,7 +21,11 @@ const CLEAR_RADIUS := 3.0 ## metres kept free of trees and debris around where a
 ## Tree models (any .glb here, git-ignored like the zombie) replace the stick
 ## trees when present; each tree picks one at random.
 const TREE_MODEL_DIR := "res://models/trees/"
-const TREE_HEIGHT := Vector2(4.0, 8.0) ## metres, min and max
+const TREE_HEIGHT := Vector2(8.0, 16.0) ## metres, min and max
+## Heights snap to this many sizes so each model needs only a few mesh colliders
+## (one per size, shared by every tree of that model and size).
+const TREE_SIZES := 5
+const TREE_SPACING := 7.0 ## minimum metres between tree trunks
 const TREE_BATCH_CELLS := 3 ## trees are batched per 3x3-cell block so distant blocks can cull and use LODs
 const PLAYER_SPEED := 5.0
 const SWAMP_SPEED_FACTOR := 0.55
@@ -61,8 +65,10 @@ var _clearings: Array[Vector3] = [] ## where the player and zombies start
 ## kind: thousands of separate meshes would be thousands of draw calls.
 ## kind -> {mesh, material, transforms: Array[Transform3D], colors: Array[Color]}
 var _batches := {}
+var _trees: Array[Vector3] = [] ## trunk positions placed so far
 
-## Loaded once: [{mesh, transform (model space -> tree root), height}] per tree model.
+## Loaded once: [{mesh, transform (model space -> tree root), height, footprint,
+## colliders: [ConcavePolygonShape3D per size]}] per tree model.
 static var _tree_models: Array = []
 static var _tree_models_loaded := false
 
@@ -248,10 +254,11 @@ func _build_cells() -> void:
 				water.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 				_add_box(c + Vector3(0, 0.03, 0), Vector3(CELL, 0.06, CELL), water)
 			"dead_forest":
-				for i in _rng.randi_range(5, 9):
-					var at := _scatter(c, 0.6)
-					if at.is_finite():
-						_add_tree(solids, at)
+				for i in _rng.randi_range(1, 3):
+					for attempt in 4: # A few tries to find room among the trees already there.
+						var reach := CELL / 2.0 - 1.0
+						if _add_tree(solids, c + Vector3(_rng.randf_range(-reach, reach), 0, _rng.randf_range(-reach, reach))):
+							break
 			"rubble", "crater":
 				for i in _rng.randi_range(8, 14):
 					var at := _scatter(c, 0.4)
@@ -334,8 +341,28 @@ static func _load_tree_models() -> Array:
 		if mi and mi.mesh:
 			# Bake the model's own node transforms in, and note its height so it can be sized in metres.
 			var xform := _relative_to(mi, scene)
-			var height := (xform * mi.mesh.get_aabb()).size.y
-			_tree_models.append({"mesh": mi.mesh, "transform": xform, "height": maxf(height, 0.01)})
+			var height := maxf((xform * mi.mesh.get_aabb()).size.y, 0.01)
+			# How far the trunk and roots spread at ground level, to keep trees off people.
+			var footprint := 0.0
+			for s in mi.mesh.get_surface_count():
+				for v: Vector3 in mi.mesh.surface_get_arrays(s)[Mesh.ARRAY_VERTEX]:
+					var w := xform * v
+					if w.y < height * 0.05:
+						footprint = maxf(footprint, Vector2(w.x, w.z).length())
+			# Mesh colliders, pre-scaled to each size (scaling a shared shape per tree isn't reliable in every physics engine).
+			var faces: PackedVector3Array = mi.mesh.get_faces()
+			for i in faces.size():
+				faces[i] = xform * faces[i]
+			var colliders: Array[ConcavePolygonShape3D] = []
+			for size in TREE_SIZES:
+				var scaled := faces.duplicate()
+				var k := _tree_height(size) / height
+				for i in scaled.size():
+					scaled[i] *= k
+				var shape := ConcavePolygonShape3D.new()
+				shape.set_faces(scaled)
+				colliders.append(shape)
+			_tree_models.append({"mesh": mi.mesh, "transform": xform, "height": height, "footprint": footprint, "colliders": colliders})
 		scene.free()
 	return _tree_models
 
@@ -350,26 +377,43 @@ static func _relative_to(n: Node3D, root: Node) -> Transform3D:
 	return xf
 
 
-func _add_tree(body: StaticBody3D, base: Vector3) -> void:
+static func _tree_height(size: int) -> float:
+	return lerpf(TREE_HEIGHT.x, TREE_HEIGHT.y, float(size) / (TREE_SIZES - 1))
+
+
+## Places a tree at `base` unless it would crowd another tree or someone's
+## starting spot. Returns whether it was placed.
+func _add_tree(body: StaticBody3D, base: Vector3) -> bool:
+	if _trees.any(func(t: Vector3) -> bool: return t.distance_to(base) < TREE_SPACING):
+		return false
 	var models := _load_tree_models()
 	if models.is_empty():
+		if _clearings.any(func(q: Vector3) -> bool: return q.distance_to(base) < CLEAR_RADIUS):
+			return false
+		_trees.append(base)
 		_add_stick_tree(body, base)
-		return
-	# A random model, turned, leaning a little, and sized and squashed a little differently each time.
+		return true
+	# A random model and size, turned and leaning a little.
 	var pick := _rng.randi_range(0, models.size() - 1)
 	var model: Dictionary = models[pick]
-	var h := _rng.randf_range(TREE_HEIGHT.x, TREE_HEIGHT.y)
-	var s: float = h / model.height
-	var spread := s * _rng.randf_range(0.85, 1.15)
-	var shape := Basis.from_euler(Vector3(_rng.randf_range(-0.06, 0.06), _rng.randf() * TAU, _rng.randf_range(-0.06, 0.06)))
-	shape = shape * Basis.from_scale(Vector3(spread, s, spread * _rng.randf_range(0.9, 1.1)))
+	var size := _rng.randi_range(0, TREE_SIZES - 1)
+	var s: float = _tree_height(size) / model.height
+	var room: float = CLEAR_RADIUS + model.footprint * s
+	if _clearings.any(func(q: Vector3) -> bool: return q.distance_to(base) < room):
+		return false
+	_trees.append(base)
+	var turn := Basis.from_euler(Vector3(_rng.randf_range(-0.06, 0.06), _rng.randf() * TAU, _rng.randf_range(-0.06, 0.06)))
 	var block := Vector2i(floori(base.x / (CELL * TREE_BATCH_CELLS)), floori(base.z / (CELL * TREE_BATCH_CELLS)))
 	var kind := StringName("tree%d@%d,%d" % [pick, block.x, block.y])
 	if not _batches.has(kind):
 		_batches[kind] = {"mesh": model.mesh, "material": null, "transforms": [], "colors": []}
-	_instance(kind, Transform3D(shape, base) * model.transform)
-	var trunk := clampf(h * 0.06, 0.3, 0.6)
-	_add_collider(body, base + Vector3(0, h / 2, 0), Vector3(trunk, h, trunk))
+	_instance(kind, Transform3D(turn * Basis.from_scale(Vector3.ONE * s), base) * model.transform)
+	# The collider is the tree's own mesh, already at this size: only turn and place it.
+	var collider := CollisionShape3D.new()
+	collider.shape = model.colliders[size]
+	collider.transform = Transform3D(turn, base)
+	body.add_child(collider)
+	return true
 
 
 ## The fallback without tree models: a trunk and a few bare branches.
