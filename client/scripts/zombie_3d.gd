@@ -18,7 +18,9 @@ const ATTACK_RANGE := 1.6
 const ATTACK_DAMAGE := 12.0
 const ATTACK_INTERVAL := 1.1
 const MAX_HEALTH := 100.0
-const WALK_ANIM_SPEED := 1.1 ## metres per second the walk animation looks right at
+## Ground speed (m/s) the walk animation matches at 1x. The bake measures the
+## real value and stores it on the model; this is the fallback.
+const DEFAULT_WALK_ANIM_SPEED := 0.3
 
 const SKIN := Color(0.33, 1.0, 0.33)
 const RAGS := Color(0.55, 0.1, 0.55)
@@ -33,7 +35,9 @@ var monster_id := 0
 var health := MAX_HEALTH
 var target: Node3D
 
-var _speed := 1.5
+var _speed := 0.9
+var _walk_anim_speed := DEFAULT_WALK_ANIM_SPEED
+var _sway := 0.35 ## sideways zigzag, as a fraction of forward speed
 var _attack_cooldown := 0.8
 var _phase := 0.0
 var _flash := 0.0
@@ -56,7 +60,9 @@ func _ready() -> void:
 	# player's capsule would push it up and carry the player off on its head.
 	# Zombies stop at claw range instead; the player still can't walk through them.
 	collision_mask = 1 | 4
-	_speed = randf_range(1.2, 1.8)
+	# Slow and relentless (the player runs at 5 m/s); the walk animation is
+	# sped up to match so the feet keep pace with the ground.
+	_speed = randf_range(0.7, 1.0)
 	_phase = randf() * TAU
 	var shape := CollisionShape3D.new()
 	var capsule := CapsuleShape3D.new()
@@ -86,6 +92,8 @@ static func _load_model() -> bool:
 func _build_model() -> void:
 	_rig = _model.instantiate()
 	add_child(_rig)
+	_walk_anim_speed = _rig.get_meta(&"walk_speed", DEFAULT_WALK_ANIM_SPEED)
+	_sway = 0.0 # The walk animation sways on its own; sideways drift would make the feet skate.
 	_body = _rig.find_children("*", "MeshInstance3D")[0]
 	_anim = _rig.find_children("*", "AnimationPlayer")[0]
 	for anim_name in _anim.get_animation_list():
@@ -102,7 +110,10 @@ func _build_model() -> void:
 		_anim.play(_walk)
 		# Out of step with each other, and stride matched to this zombie's pace.
 		_anim.seek(randf() * _anim.get_animation(_walk).length, true)
-		_anim.speed_scale = _speed / WALK_ANIM_SPEED
+		_anim.speed_scale = _speed / _walk_anim_speed
+	# Step the animation with the body's movement (physics ticks), not render
+	# frames, so planted feet stay put between ticks.
+	_anim.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS
 	_anim.animation_finished.connect(_on_animation_finished)
 	# Radioactive: a faint green glow around each one.
 	var glow := OmniLight3D.new()
@@ -175,7 +186,7 @@ func _physics_process(delta: float) -> void:
 	if walking:
 		var forward := to / dist
 		var side := Vector3(forward.z, 0, -forward.x)
-		velocity = (forward + side * sin(_phase * 0.5) * 0.35).normalized() * _speed
+		velocity = (forward + side * sin(_phase * 0.5) * _sway).normalized() * _speed
 	else:
 		velocity = Vector3.ZERO
 	move_and_slide()
@@ -187,9 +198,9 @@ func _physics_process(delta: float) -> void:
 		_play_attack()
 
 	if _anim:
-		# Shuffle in place while clawing, full stride while closing in.
+		# Full stride while closing in, a slow shuffle in place while clawing.
 		if _anim.current_animation == _walk:
-			_anim.speed_scale = (_speed if walking else 0.5) / WALK_ANIM_SPEED
+			_anim.speed_scale = (_speed if walking else _walk_anim_speed * 1.2) / _walk_anim_speed
 	else:
 		# Block figure: sway the body, swing the arms out of step.
 		_rig.rotation.z = sin(_phase) * 0.08

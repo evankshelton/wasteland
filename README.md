@@ -130,6 +130,11 @@ godot --headless --path client --import
 godot --headless --path client -s res://tools/rig_zombie.gd
 ```
 
+The bake also measures how fast the walk animation carries the zombie forward
+and stores it on the scene, so in the game the walk is sped up to match each
+zombie's pace (0.7–1.0 m/s, about 2.2–3× the animation's speed) and the feet
+don't skate.
+
 Re-run it after changing the model or adding animations. Animations are named
 after their FBX files and matched by name: one with "walk" in it is the
 shamble (required), "attack"/"punch"/"bite" plays when a zombie claws you, and

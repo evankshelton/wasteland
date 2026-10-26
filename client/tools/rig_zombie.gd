@@ -17,6 +17,10 @@ extends SceneTree
 ##
 ## Re-run it after changing the mesh or adding animations. Animation names are
 ## the FBX file names in snake case ("Zombie Walk.fbx" -> "zombie_walk").
+##
+## It also measures how fast the walk carries the zombie forward (how fast a
+## planted foot slides back) and stores it as the scene's "walk_speed" metadata,
+## so the game can match animation speed to movement and the feet don't skate.
 
 const DIR := "res://models/zombie/"
 const MESH_PATH := DIR + "mesh/zombie.obj"
@@ -26,10 +30,11 @@ const HEIGHT := 1.8 ## metres, head to toe
 const FINGERS := ["Thumb", "Index", "Middle", "Ring", "Pinky"]
 const LOOPING := ["walk", "idle", "run", "crawl"]
 const BLEND_RATIO := 1.6 ## blend with a related bone this much further away
+const DEFAULT_WALK_SPEED := 0.3 ## m/s, if the walk can't be measured
 
 
 func _init() -> void:
-	_bake()
+	_bake.call_deferred() # Once the scene tree is live, so the walk can be posed and measured.
 
 
 func _bake() -> void:
@@ -127,9 +132,31 @@ func _bake() -> void:
 		err = ResourceSaver.save(packed, OUT_PATH)
 	if err != OK:
 		return _fail("could not save %s: %s" % [OUT_PATH, error_string(err)])
-	print("saved %s in %.1fs" % [OUT_PATH, (Time.get_ticks_msec() - started) / 1000.0])
 	source.free()
 	root.free()
+
+	# Measure the walk's natural ground speed on the saved model, posed in the
+	# tree, and store it on the scene.
+	var model: Node3D = (load(OUT_PATH) as PackedScene).instantiate()
+	get_root().add_child(model)
+	var model_player: AnimationPlayer = model.find_children("*", "AnimationPlayer")[0]
+	var model_skeleton: Skeleton3D = model.find_children("*", "Skeleton3D")[0]
+	for anim_name in model_player.get_animation_list():
+		if "walk" in anim_name:
+			var speed := _measure_walk(model_player, model_skeleton, anim_name)
+			model.set_meta(&"walk_speed", speed)
+			print("%s moves the zombie forward at %.2f m/s at normal speed" % [anim_name, speed])
+			break
+	model_player.stop()
+	get_root().remove_child(model)
+	packed = PackedScene.new()
+	err = packed.pack(model)
+	if err == OK:
+		err = ResourceSaver.save(packed, OUT_PATH)
+	model.free()
+	if err != OK:
+		return _fail("could not save %s: %s" % [OUT_PATH, error_string(err)])
+	print("saved %s in %.1fs" % [OUT_PATH, (Time.get_ticks_msec() - started) / 1000.0])
 	quit(0)
 
 
@@ -209,6 +236,43 @@ func _add_animations(path: String, library: AnimationLibrary, factor: float) -> 
 			names.append(anim_name)
 	scene.free()
 	return names
+
+
+## How fast the walk carries the zombie forward, in metres per second (Rig
+## scale included). An in-place walk moves each planted foot steadily backwards
+## and swings it forward quickly, so this is the toe's total backward travel
+## divided by the time spent moving backwards, averaged over both feet. (This
+## walk drags its feet, so "how close to the ground" can't tell planted from
+## swinging.)
+func _measure_walk(player: AnimationPlayer, sk: Skeleton3D, anim_name: String) -> float:
+	var anim := player.get_animation(anim_name)
+	player.play(anim_name)
+	player.pause()
+	var steps := 400
+	var dt := anim.length / steps
+	var speeds: Array[float] = []
+	for toe in ["mixamorig_LeftToeBase", "mixamorig_RightToeBase"]:
+		var bone := sk.find_bone(toe)
+		if bone < 0:
+			continue
+		var back := 0.0
+		var back_time := 0.0
+		var prev := 0.0
+		for i in steps + 1:
+			player.seek(i * dt, true)
+			var z := (sk.global_transform * sk.get_bone_global_pose(bone)).origin.z
+			if i > 0 and z < prev: # walking +z, so a planted foot slides towards -z
+				back += prev - z
+				back_time += dt
+			prev = z
+		if back_time > 0.0:
+			speeds.append(back / back_time)
+	if speeds.is_empty():
+		return DEFAULT_WALK_SPEED
+	var total := 0.0
+	for v in speeds:
+		total += v
+	return total / speeds.size()
 
 
 func _fail(why: String) -> void:
