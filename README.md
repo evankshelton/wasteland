@@ -168,6 +168,22 @@ shamble (required), "attack"/"punch"/"bite" plays when a zombie claws you, and
 "death"/"dying" when it dies. Without those two, the zombie lunges and topples
 instead.
 
+### Tree models
+
+Dead forests in the first-person arena use tree models when there are any in
+`client/models/trees/` (git-ignored): every `.glb` there is a candidate, and
+each tree picks one at random, turned, leaning slightly and sized between 4 and
+8 m tall. Models can be any size; they're scaled by their height. Without any,
+the arena falls back to simple stick trees.
+
+To look at an arena of one terrain without running a server:
+
+```bash
+godot --path client res://tests/arena_preview.tscn -- --terrain dead_forest --screenshot out.png
+```
+
+It prints fps and draw calls after a few seconds, saves the screenshot, and quits.
+
 ### Adding a terrain type
 
 1. Add it to `shared/tiles.json` (next free id, plus its world-map `color`).

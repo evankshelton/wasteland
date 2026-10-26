@@ -18,6 +18,11 @@ const CELL := 12.0 ## metres per overworld tile
 const GROUND_QUAD := 2.0 ## metres per repeat of a tile's pixel art on the ground
 const BLOCK_TEXTURE_SIZE := 4.0 ## metres per repeat of a tile's pixel art on blocks
 const CLEAR_RADIUS := 3.0 ## metres kept free of trees and debris around where anyone starts
+## Tree models (any .glb here, git-ignored like the zombie) replace the stick
+## trees when present; each tree picks one at random.
+const TREE_MODEL_DIR := "res://models/trees/"
+const TREE_HEIGHT := Vector2(4.0, 8.0) ## metres, min and max
+const TREE_BATCH_CELLS := 3 ## trees are batched per 3x3-cell block so distant blocks can cull and use LODs
 const PLAYER_SPEED := 5.0
 const SWAMP_SPEED_FACTOR := 0.55
 const MOUSE_SENSITIVITY := 0.0025
@@ -56,6 +61,10 @@ var _clearings: Array[Vector3] = [] ## where the player and zombies start
 ## kind: thousands of separate meshes would be thousands of draw calls.
 ## kind -> {mesh, material, transforms: Array[Transform3D], colors: Array[Color]}
 var _batches := {}
+
+## Loaded once: [{mesh, transform (model space -> tree root), height}] per tree model.
+static var _tree_models: Array = []
+static var _tree_models_loaded := false
 
 @onready var arena: Node3D = %Arena
 @onready var enemies_root: Node3D = %Enemies
@@ -310,7 +319,61 @@ func _build_gun() -> void:
 		gun.add_child(mi)
 
 
+static func _load_tree_models() -> Array:
+	if _tree_models_loaded:
+		return _tree_models
+	_tree_models_loaded = true
+	var dir := DirAccess.open(TREE_MODEL_DIR)
+	if dir == null:
+		return _tree_models
+	var files := Array(dir.get_files()).filter(func(f: String) -> bool: return f.get_extension().to_lower() == "glb")
+	files.sort()
+	for f: String in files:
+		var scene: Node3D = (load(TREE_MODEL_DIR + f) as PackedScene).instantiate()
+		var mi: MeshInstance3D = scene.find_children("*", "MeshInstance3D", true, false).front()
+		if mi and mi.mesh:
+			# Bake the model's own node transforms in, and note its height so it can be sized in metres.
+			var xform := _relative_to(mi, scene)
+			var height := (xform * mi.mesh.get_aabb()).size.y
+			_tree_models.append({"mesh": mi.mesh, "transform": xform, "height": maxf(height, 0.01)})
+		scene.free()
+	return _tree_models
+
+
+## Transform of `n` relative to its ancestor `root`, for scenes that aren't in the tree.
+static func _relative_to(n: Node3D, root: Node) -> Transform3D:
+	var xf := n.transform
+	var p := n.get_parent()
+	while p != root and p is Node3D:
+		xf = (p as Node3D).transform * xf
+		p = p.get_parent()
+	return xf
+
+
 func _add_tree(body: StaticBody3D, base: Vector3) -> void:
+	var models := _load_tree_models()
+	if models.is_empty():
+		_add_stick_tree(body, base)
+		return
+	# A random model, turned, leaning a little, and sized and squashed a little differently each time.
+	var pick := _rng.randi_range(0, models.size() - 1)
+	var model: Dictionary = models[pick]
+	var h := _rng.randf_range(TREE_HEIGHT.x, TREE_HEIGHT.y)
+	var s: float = h / model.height
+	var spread := s * _rng.randf_range(0.85, 1.15)
+	var shape := Basis.from_euler(Vector3(_rng.randf_range(-0.06, 0.06), _rng.randf() * TAU, _rng.randf_range(-0.06, 0.06)))
+	shape = shape * Basis.from_scale(Vector3(spread, s, spread * _rng.randf_range(0.9, 1.1)))
+	var block := Vector2i(floori(base.x / (CELL * TREE_BATCH_CELLS)), floori(base.z / (CELL * TREE_BATCH_CELLS)))
+	var kind := StringName("tree%d@%d,%d" % [pick, block.x, block.y])
+	if not _batches.has(kind):
+		_batches[kind] = {"mesh": model.mesh, "material": null, "transforms": [], "colors": []}
+	_instance(kind, Transform3D(shape, base) * model.transform)
+	var trunk := clampf(h * 0.06, 0.3, 0.6)
+	_add_collider(body, base + Vector3(0, h / 2, 0), Vector3(trunk, h, trunk))
+
+
+## The fallback without tree models: a trunk and a few bare branches.
+func _add_stick_tree(body: StaticBody3D, base: Vector3) -> void:
 	var h := _rng.randf_range(3.5, 5.5)
 	_instance(&"trunk", Transform3D(Basis.from_scale(Vector3(1, h, 1)), base + Vector3(0, h / 2, 0)))
 	for i in _rng.randi_range(2, 4):
@@ -365,7 +428,8 @@ func _flush_batches() -> void:
 			mm.set_instance_color(i, batch.colors[i])
 		var mmi := MultiMeshInstance3D.new()
 		mmi.multimesh = mm
-		mmi.material_override = batch.material
+		if batch.material:
+			mmi.material_override = batch.material # Otherwise the mesh's own materials (tree models).
 		arena.add_child(mmi)
 	_batches.clear()
 
