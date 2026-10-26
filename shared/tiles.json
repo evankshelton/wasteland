@@ -17,7 +17,18 @@
     { "id": 12, "key": "swamp",       "name": "Sludge Marsh",     "passable": true,  "color": "#6a2a6e" },
     { "id": 13, "key": "dunes",       "name": "Ash Dunes",        "passable": true,  "color": "#a08a55" },
     { "id": 14, "key": "base_wall",   "name": "Base Wall",        "passable": false, "color": "#ffffff" },
-    { "id": 15, "key": "base_floor",  "name": "Base",             "passable": true,  "color": "#ff8c1a" },
-    { "id": 16, "key": "base_gate",   "name": "Base Gate",        "passable": true,  "color": "#ffff55" }
+    { "id": 15, "key": "base_floor",  "name": "Floor",            "passable": true,  "color": "#ff8c1a" },
+    { "id": 16, "key": "base_gate",   "name": "Base Gate",        "passable": true,  "color": "#ffff55" },
+    { "id": 17, "key": "base_icon",   "name": "Base",             "passable": true,  "color": "#ff8c1a" },
+    { "id": 18, "key": "concrete",    "name": "Concrete",         "passable": true,  "color": "#6e6e6e" },
+    { "id": 19, "key": "door",        "name": "Door",             "passable": true,  "color": "#aa5500" },
+    { "id": 20, "key": "counter",     "name": "Counter",          "passable": false, "color": "#8c5528" },
+    { "id": 21, "key": "weapon_rack", "name": "Weapon Rack",      "passable": false, "color": "#555555" },
+    { "id": 22, "key": "armor_rack",  "name": "Armor Rack",       "passable": false, "color": "#8a8a8a" },
+    { "id": 23, "key": "cot",         "name": "Cot",              "passable": false, "color": "#4a5aaa" },
+    { "id": 24, "key": "crate",       "name": "Supply Crate",     "passable": false, "color": "#8a6a2a" },
+    { "id": 25, "key": "medbay",      "name": "Infirmary",        "passable": true,  "color": "#e8e8e8" },
+    { "id": 26, "key": "decon",       "name": "Decon Shower",     "passable": true,  "color": "#55ff55" },
+    { "id": 27, "key": "terminal",    "name": "Terminal",         "passable": false, "color": "#55ffff" }
   ]
 }

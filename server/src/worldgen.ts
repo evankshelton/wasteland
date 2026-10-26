@@ -7,13 +7,22 @@ import { T } from "./tiles.ts";
 
 export const CHUNK_SIZE = 32;
 
-/** The base: a walled compound centred on the world origin. */
+/**
+ * The base: one icon tile at the world origin (like an Ultima IV town), entered
+ * with the enter key. Its interior is a separate map (see base.ts).
+ */
 export const BASE = {
-  half: 8, // walls run from -half..half on both axes
+  icon: { x: 0, y: 0 },
+  safeRadius: 4, // zombies keep at least this far (Chebyshev) from the icon
   clearRadius: 16, // terrain inside this radius is kept walkable
   calmRadius: 70, // hazards fade in between clearRadius and this
-  spawn: { x: 0, y: 0 },
 } as const;
+
+/**
+ * Bump when generation changes for land that may already be saved, and add a
+ * migration in World. v2: the walled compound became a single base icon.
+ */
+export const WORLD_VERSION = 2;
 
 // Independent noise channels derived from the world seed.
 const CH = { elev: 11, moist: 23, rad: 37, urban: 41, roadA: 53, roadB: 67, speck: 79, crater: 83, city: 97 } as const;
@@ -21,21 +30,10 @@ const CH = { elev: 11, moist: 23, rad: 37, urban: 41, roadA: 53, roadB: 67, spec
 const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
 
 function baseTile(x: number, y: number): number | undefined {
-  const h = BASE.half;
-  const ax = Math.abs(x);
-  const ay = Math.abs(y);
-  if (ax > h || ay > h) {
-    // A short stretch of highway leading south out of the gate.
-    if (x === 0 && y > h && y <= h + 24) return T.ROAD;
-    return undefined;
-  }
-  const onWall = ax === h || ay === h;
-  if (onWall) {
-    if (x === 0 && (y === h || y === -h)) return T.BASE_GATE;
-    if (y === 0 && (x === h || x === -h)) return T.BASE_GATE;
-    return T.BASE_WALL;
-  }
-  return T.BASE_FLOOR;
+  if (x === BASE.icon.x && y === BASE.icon.y) return T.BASE_ICON;
+  // A stretch of old highway leading south from the base.
+  if (x === BASE.icon.x && y > BASE.icon.y && y <= BASE.icon.y + 24) return T.ROAD;
+  return undefined;
 }
 
 /**

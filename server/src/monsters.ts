@@ -64,9 +64,9 @@ export interface Contact {
 
 const cheb = (a: Pos, b: Pos) => Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
 
-/** The base and the ring just outside its walls are off limits to zombies. */
+/** The tiles around the base icon are off limits to zombies. */
 export function inSafeZone(x: number, y: number): boolean {
-  return Math.max(Math.abs(x), Math.abs(y)) <= BASE.half + 2;
+  return Math.max(Math.abs(x - BASE.icon.x), Math.abs(y - BASE.icon.y)) <= BASE.safeRadius;
 }
 
 export class Monsters {

@@ -3,21 +3,28 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
+export type Location = "overworld" | "base";
+
 export interface PlayerRecord {
   id: number;
   name: string;
   token: string;
+  /** Overworld position (where the player is, or where they'll be on leaving the base). */
   x: number;
   y: number;
+  loc: Location;
+  /** Position inside the base map, while loc is "base". */
+  bx: number;
+  by: number;
 }
 
-const SCHEMA_VERSION = 1;
+export type SavedPosition = Pick<PlayerRecord, "id" | "x" | "y" | "loc" | "bx" | "by">;
+
+const SCHEMA_VERSION = 2;
 
 export class Storage {
   private db: DatabaseSync;
   private q: {
-    getMeta: StatementSync;
-    setMeta: StatementSync;
     getChunk: StatementSync;
     putChunk: StatementSync;
     countChunks: StatementSync;
@@ -54,27 +61,39 @@ export class Storage {
         last_seen  INTEGER NOT NULL
       );
     `);
+    this.upgradeSchema();
     this.q = {
-      getMeta: this.db.prepare("SELECT value FROM meta WHERE key = ?"),
-      setMeta: this.db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"),
       getChunk: this.db.prepare("SELECT tiles FROM chunks WHERE cx = ? AND cy = ?"),
       putChunk: this.db.prepare("INSERT OR REPLACE INTO chunks (cx, cy, tiles, generated_at) VALUES (?, ?, ?, ?)"),
       countChunks: this.db.prepare("SELECT COUNT(*) AS n FROM chunks"),
       chunkCoords: this.db.prepare("SELECT cx, cy FROM chunks"),
-      playerByName: this.db.prepare("SELECT id, name, token, x, y FROM players WHERE name = ?"),
-      insertPlayer: this.db.prepare("INSERT INTO players (name, token, x, y, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?)"),
-      savePlayer: this.db.prepare("UPDATE players SET x = ?, y = ?, last_seen = ? WHERE id = ?"),
+      playerByName: this.db.prepare(`SELECT id, name, token, x, y, location AS loc, base_x AS bx, base_y AS "by" FROM players WHERE name = ?`),
+      insertPlayer: this.db.prepare(
+        "INSERT INTO players (name, token, x, y, location, base_x, base_y, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ),
+      savePlayer: this.db.prepare("UPDATE players SET x = ?, y = ?, location = ?, base_x = ?, base_y = ?, last_seen = ? WHERE id = ?"),
     };
-    if (this.getMeta("schema_version") === undefined) this.setMeta("schema_version", String(SCHEMA_VERSION));
+  }
+
+  /** Add columns introduced after a database was created. */
+  private upgradeSchema(): void {
+    const version = Number(this.getMeta("schema_version") ?? 1);
+    if (version < 2) {
+      const cols = new Set((this.db.prepare("PRAGMA table_info(players)").all() as { name: string }[]).map((c) => c.name));
+      if (!cols.has("location")) this.db.exec("ALTER TABLE players ADD COLUMN location TEXT NOT NULL DEFAULT 'overworld'");
+      if (!cols.has("base_x")) this.db.exec("ALTER TABLE players ADD COLUMN base_x INTEGER NOT NULL DEFAULT 0");
+      if (!cols.has("base_y")) this.db.exec("ALTER TABLE players ADD COLUMN base_y INTEGER NOT NULL DEFAULT 0");
+    }
+    if (version < SCHEMA_VERSION) this.setMeta("schema_version", String(SCHEMA_VERSION));
   }
 
   getMeta(key: string): string | undefined {
-    const row = this.q.getMeta.get(key) as { value: string } | undefined;
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined;
     return row?.value;
   }
 
   setMeta(key: string, value: string): void {
-    this.q.setMeta.run(key, value);
+    this.db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
   }
 
   getChunk(cx: number, cy: number): Uint8Array | undefined {
@@ -99,16 +118,16 @@ export class Storage {
     return this.q.playerByName.get(name) as PlayerRecord | undefined;
   }
 
-  createPlayer(name: string, token: string, x: number, y: number): PlayerRecord {
+  createPlayer(name: string, token: string, start: Omit<SavedPosition, "id">): PlayerRecord {
     const now = Date.now();
-    const res = this.q.insertPlayer.run(name, token, x, y, now, now);
-    return { id: Number(res.lastInsertRowid), name, token, x, y };
+    const res = this.q.insertPlayer.run(name, token, start.x, start.y, start.loc, start.bx, start.by, now, now);
+    return { id: Number(res.lastInsertRowid), name, token, ...start };
   }
 
-  savePlayers(players: Iterable<{ id: number; x: number; y: number }>): void {
+  savePlayers(players: Iterable<SavedPosition>): void {
     const now = Date.now();
     this.transaction(() => {
-      for (const p of players) this.q.savePlayer.run(p.x, p.y, now, p.id);
+      for (const p of players) this.q.savePlayer.run(p.x, p.y, p.loc, p.bx, p.by, now, p.id);
     });
   }
 

@@ -1,5 +1,6 @@
 // Entry point: `npm start -- --port 7777 --db data/world.db`
 import { parseArgs } from "node:util";
+import { BaseMap } from "./base.ts";
 import { DEFAULT_MONSTER_OPTIONS } from "./monsters.ts";
 import { GameServer } from "./server.ts";
 import { Storage } from "./storage.ts";
@@ -37,7 +38,7 @@ if (seed !== undefined && !Number.isInteger(seed)) {
 
 const storage = new Storage(args.db!);
 const world = new World(storage, seed);
-const server = new GameServer(world, storage, {
+const server = new GameServer(world, storage, BaseMap.load(), {
   host: args.host!,
   port,
   motd: args.motd!,

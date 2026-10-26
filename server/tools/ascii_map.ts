@@ -12,7 +12,7 @@ const glyph: Record<number, string> = {
   [T.WASTELAND]: ".", [T.SCRUB]: ",", [T.DEAD_FOREST]: "t", [T.RUBBLE]: ":",
   [T.RUINS]: "#", [T.ROAD]: "=", [T.HILLS]: "n", [T.MOUNTAINS]: "^",
   [T.CRATER]: "o", [T.RADIATION]: "%", [T.WATER]: "~", [T.SWAMP]: "\"",
-  [T.DUNES]: "-", [T.BASE_WALL]: "H", [T.BASE_FLOOR]: " ", [T.BASE_GATE]: "+",
+  [T.DUNES]: "-", [T.BASE_WALL]: "H", [T.BASE_FLOOR]: " ", [T.BASE_GATE]: "+", [T.BASE_ICON]: "@",
 };
 
 for (let row = 0; row < height; row++) {

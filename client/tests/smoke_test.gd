@@ -5,13 +5,19 @@ extends Node
 ##
 ##   godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 --port 7777
 ##
+## --expect-base plays a brand-new character (random name unless --name is
+## given): it must start inside the base, talk to the gate guard with the enter
+## key, walk out of the south gate, step back onto the base icon, enter again
+## with the enter key, and leave once more before the usual checks.
+##
 ## --expect-encounter also waits for zombies to catch the player, checks the
 ## first-person arena, shoots a zombie, wins that fight, then waits for another
 ## and flees across the arena's edge. Needs a server with a high zombie spawn
 ## chance and the player far enough from the base for zombies to spawn.
 ##
 ## Without --headless it also saves screenshots (--screenshot <path>; the map
-## view goes to <path> with "_map" before the extension, the fight to "_fps").
+## view goes to <path> with "_map" before the extension, the fight to "_fps",
+## the base to "_base").
 
 const GAME_SCENE := preload("res://scenes/game.tscn")
 
@@ -20,11 +26,15 @@ var port := 7777
 var player_name := "SmokeTest"
 var screenshot := ""
 var expect_encounter := false
+var expect_base := false
 
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	expect_encounter = "--expect-encounter" in args
+	expect_base = "--expect-base" in args
+	if expect_base and "--name" not in args:
+		player_name = "Recruit%d" % (randi() % 100000)
 	for i in args.size() - 1:
 		match args[i]:
 			"--host": host = args[i + 1]
@@ -38,6 +48,10 @@ func _run() -> void:
 	var game := await _join()
 	if game == null:
 		return
+	if expect_base:
+		var problem: String = await _test_base(game)
+		if not problem.is_empty():
+			return _finish(false, problem)
 	var start: Vector2i = game.pos
 	print("joined at %s" % start)
 
@@ -93,6 +107,68 @@ func _run() -> void:
 
 
 ## Returns "" on success, otherwise what went wrong.
+func _test_base(game: Node) -> String:
+	if game.location != "base":
+		return "a new character started in the %s, not the base" % game.location
+	if not game.base_terrain.visible or game.terrain.visible:
+		return "the base map isn't the one showing"
+	if game.npcs.size() < 5:
+		return "only %d NPCs in the base" % game.npcs.size()
+	var entry: Vector2i = game.pos
+	print("in %s at %s (%s) with %d NPCs" % [game.base_info.name, entry, game._room_at(entry), game.npcs.size()])
+
+	# The gate guard stands next to the entrance: the enter key talks to him.
+	_send_action(&"enter")
+	await get_tree().process_frame
+	if not game.dialog.visible:
+		return "the enter key didn't start a conversation next to the gate guard"
+	print("%s: %s" % [game.dialog_name.text, game.dialog_text.text])
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_base." + screenshot.get_extension())
+	while game.dialog.visible:
+		_send_action(&"enter")
+		await get_tree().process_frame
+
+	# Out through the south gate: gate, road, road, off the edge.
+	await _steps(game, &"move_down", 4)
+	if game.location != "overworld" or game.pos != Vector2i(0, 1):
+		return "walking off the south edge left us in the %s at %s, expected the overworld at (0, 1)" % [game.location, game.pos]
+	await _steps(game, &"move_up", 1)
+	if game.tile_at(game.pos) != game._base_icon_id:
+		return "(0, 0) isn't the base icon"
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_icon." + screenshot.get_extension())
+	_send_action(&"enter")
+	if not await _wait_until(func() -> bool: return game.location == "base"):
+		return "the enter key on the base icon didn't go inside"
+	if game.pos != entry:
+		return "entered at %s, expected the entrance %s" % [game.pos, entry]
+	print("re-entered the base at %s" % game.pos)
+	await _steps(game, &"move_down", 4)
+	if game.location != "overworld":
+		return "couldn't leave the base again"
+	return ""
+
+
+## Steps one tile at a time at the pace of a held key, waiting for each reply
+## (and any map switch it causes). The server refuses steps closer than 60 ms.
+func _steps(game: Node, action: StringName, count: int) -> void:
+	for i in count:
+		game._step(action)
+		while game._pending_seq >= 0:
+			await get_tree().process_frame
+		await get_tree().create_timer(game.MOVE_REPEAT).timeout
+
+
+func _wait_until(condition: Callable, timeout_ms := 5000) -> bool:
+	var deadline := Time.get_ticks_msec() + timeout_ms
+	while not condition.call():
+		if Time.get_ticks_msec() > deadline:
+			return false
+		await get_tree().process_frame
+	return true
+
+
 func _test_encounters(game: Node) -> String:
 	# 1. Stand still until a zombie catches us.
 	var enc: Node3D = await _wait_for_encounter(game)

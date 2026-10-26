@@ -1,0 +1,249 @@
+{
+  "_comment": "The base interior: a small Ultima IV-style town map. Edit `map` freely (one character per tile, see `legend`); every row must be the same length. Walking off any edge leaves the base onto the overworld tile on that side of the base icon. Coordinates are [x, y] from the top-left.",
+  "name": "Wasteland Base",
+  "legend": {
+    ".": "wasteland",
+    ",": "scrub",
+    "=": "road",
+    ":": "concrete",
+    "_": "base_floor",
+    "#": "base_wall",
+    "G": "base_gate",
+    "+": "door",
+    "C": "counter",
+    "W": "weapon_rack",
+    "A": "armor_rack",
+    "B": "cot",
+    "X": "crate",
+    "H": "medbay",
+    "D": "decon",
+    "T": "terminal"
+  },
+  "map": [
+    "...,..,.,.,,..,==....,..,,......",
+    ".,,............==..,....,.......",
+    "..#############GG#############..",
+    "..#::::::::::::::::::::::::::#..",
+    ".,#:########::::::::########:#..",
+    "..#:#WW__WW#:XX:::::#AA__AA#:#..",
+    "..#:#______#::::::X:#______#:#..",
+    "..#:#CCCCCC#::::::::#CCCCCC#:#..",
+    ",.#:#______#::::::::#______#:#..",
+    "..#:###+####::::::::####+###:#.,",
+    "..#::::::::::::::::::::::::::#..",
+    ",.#:######::########::######:#.,",
+    "..#:#B__B#::#TT__TT#::#X_XX#:#..",
+    "..#:#____#::#______#::#____#:#..",
+    ",.#:###+##::#______#::##+###:#..",
+    "==G:::::::::+______+:::::::::G==",
+    "==G:::::::::#______#:::::::::G==",
+    ",.#:::::::::#______#:::::::::#..",
+    "..#:::::::::#______#:::::::::#..",
+    ".,#:::::::::###++###:::::::::#.,",
+    ",.#::::::::::::::::::::::::::#..",
+    ",,#:###+####::::::::###+####:#..",
+    "..#:#HHHCHH#::::::::#____C_#:#..",
+    "..#:#BHHCHH#::::::::#DD__C_#:#.,",
+    ",,#:#HHHCHH#:X::::::#____C_#:#..",
+    "..#:#BHHCHH#::::::X:#DD__C_#:#.,",
+    "..#:#HHHCHH#::::::::#____C_#:#..",
+    "..#:########::::::::########:#..",
+    "..#::::::::::::::::::::::::::#,.",
+    "..#############GG#############..",
+    ",..,.,.........==........,,.,..,",
+    ".,...,...,.....==.....,......,.."
+  ],
+  "entry": [
+    15,
+    28
+  ],
+  "respawn": [
+    6,
+    24
+  ],
+  "rooms": [
+    {
+      "name": "Armory",
+      "rect": [
+        5,
+        5,
+        6,
+        4
+      ]
+    },
+    {
+      "name": "Armor Shop",
+      "rect": [
+        21,
+        5,
+        6,
+        4
+      ]
+    },
+    {
+      "name": "Infirmary",
+      "rect": [
+        5,
+        22,
+        6,
+        5
+      ]
+    },
+    {
+      "name": "Decontamination",
+      "rect": [
+        21,
+        22,
+        6,
+        5
+      ]
+    },
+    {
+      "name": "Command Center",
+      "rect": [
+        13,
+        12,
+        6,
+        7
+      ]
+    },
+    {
+      "name": "Barracks",
+      "rect": [
+        5,
+        12,
+        4,
+        2
+      ]
+    },
+    {
+      "name": "Supply Depot",
+      "rect": [
+        23,
+        12,
+        4,
+        2
+      ]
+    },
+    {
+      "name": "Courtyard",
+      "rect": [
+        3,
+        3,
+        26,
+        26
+      ]
+    }
+  ],
+  "npcs": [
+    {
+      "id": 1,
+      "name": "Rourke",
+      "role": "Quartermaster",
+      "service": "weapons",
+      "pos": [
+        7,
+        6
+      ],
+      "lines": [
+        "Pipe rifles, scatterguns, the odd laser if a scav gets lucky.",
+        "Everything's caps, up front. Trading opens once the supply runs are sorted."
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Mags",
+      "role": "Armorer",
+      "service": "armor",
+      "pos": [
+        23,
+        6
+      ],
+      "lines": [
+        "Leather, scrap plate, a riot suit if you're feeling rich.",
+        "Can't sell you any yet. Come back when the ledger's working."
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Doc Ellis",
+      "role": "Medic",
+      "service": "healing",
+      "pos": [
+        9,
+        24
+      ],
+      "lines": [
+        "Sit down before you fall down.",
+        "Once we're tracking your wounds out there, I can patch them up here."
+      ]
+    },
+    {
+      "id": 4,
+      "name": "Sievert",
+      "role": "Decon Tech",
+      "service": "radiation",
+      "pos": [
+        26,
+        24
+      ],
+      "lines": [
+        "You're glowing. Literally. Into the showers.",
+        "Rad scrubbing comes online when the counters start measuring what you've soaked up."
+      ]
+    },
+    {
+      "id": 5,
+      "name": "Commander Vance",
+      "role": "Commander",
+      "service": "missions",
+      "pos": [
+        15,
+        14
+      ],
+      "lines": [
+        "This base is all that's left between us and the dead.",
+        "The zombies are thickest in the hot zones. Clear what you can, and come back alive."
+      ]
+    },
+    {
+      "id": 6,
+      "name": "Sgt. Okafor",
+      "role": "Barracks",
+      "service": "rest",
+      "pos": [
+        6,
+        13
+      ],
+      "lines": [
+        "Bunks are for people who made it back. Grab one."
+      ]
+    },
+    {
+      "id": 7,
+      "name": "Tully",
+      "role": "Depot Clerk",
+      "service": "storage",
+      "pos": [
+        26,
+        13
+      ],
+      "lines": [
+        "Every crate's counted twice. If it's yours, it'll be here when you get back. Eventually."
+      ]
+    },
+    {
+      "id": 8,
+      "name": "Pike",
+      "role": "Gate Guard",
+      "service": "",
+      "pos": [
+        14,
+        28
+      ],
+      "lines": [
+        "Walk off any edge to head back out. Mind the zombies past the wire."
+      ]
+    }
+  ]
+}

@@ -18,6 +18,10 @@ export const TILE_SIZE: number = raw.tileSize;
 export const TILE_DEFS: readonly TileDef[] = raw.tiles;
 
 const byKey = new Map(TILE_DEFS.map((t) => [t.key, t.id]));
+/** Tile id for a key from shared/tiles.json; throws if there is no such tile. */
+export function tileId(key: string): number {
+  return id(key);
+}
 function id(key: string): number {
   const v = byKey.get(key);
   if (v === undefined) throw new Error(`shared/tiles.json is missing tile "${key}"`);
@@ -42,6 +46,7 @@ export const T = {
   BASE_WALL: id("base_wall"),
   BASE_FLOOR: id("base_floor"),
   BASE_GATE: id("base_gate"),
+  BASE_ICON: id("base_icon"),
 } as const;
 
 const passable = new Uint8Array(256);

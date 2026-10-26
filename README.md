@@ -1,13 +1,15 @@
 # Wasteland
 
 A multiplayer post-apocalyptic overworld in the spirit of *Operation Overkill II*
-with *Ultima IV*-style tiles. Players start inside a walled **base**; everything
-outside is wasteland that the server generates as players explore it.
+with *Ultima IV*-style tiles. Players start inside the **base**, a small walled
+town shown on the overworld as a single icon; everything outside is wasteland
+that the server generates as players explore it.
 
 ```
 client/   Godot 4.7 game client (GDScript)
 server/   Node.js 24 world server (TypeScript, SQLite, WebSocket)
-shared/   tiles.json — terrain ids/names/passability shared by both
+shared/   tiles.json — terrain ids/names/passability/map colours shared by both
+          base.json  — the base interior: map, rooms and NPCs
 docs/     PROTOCOL.md — the client/server message format
 ```
 
@@ -29,14 +31,19 @@ Options: `npm start -- --port 7777 --host 0.0.0.0 --db data/world.db --seed 1234
 `godot --path client`. Enter the server address, port and a name, then Connect.
 Move with the arrow keys or WASD. Esc opens the menu.
 
+Stand on the base icon and press **E** to go inside. The base is its own small
+map, like an Ultima IV city: walk off any edge to leave, and you come out on
+the overworld tile on that side of the icon. Inside, press E (or walk into
+someone) to talk to the NPC next to you or across a counter.
+
 Press **M** for the world map: every part of the world any player has explored,
 one pixel per tile. Scroll by dragging or with the movement keys, zoom with
 the mouse wheel or `+`/`-`, press **C** to jump back to yourself, and M or Esc
 to close it.
 
 All keys are input actions you can rebind in *Project Settings → Input Map*:
-`move_up`, `move_down`, `move_left`, `move_right`, `open_map`, `map_zoom_in`,
-`map_zoom_out`, `map_center`, `shoot`.
+`move_up`, `move_down`, `move_left`, `move_right`, `enter`, `open_map`,
+`map_zoom_in`, `map_zoom_out`, `map_center`, `shoot`.
 
 Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --autoconnect`
 
@@ -53,12 +60,29 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
 - The server is authoritative: it checks every step against the terrain, and
   saves player positions every 5 seconds, on disconnect and on shutdown.
   Reconnecting with the same name puts you back where you were.
-- Other players within 40 tiles are shown (tinted orange).
+- Other players within 40 tiles on the same map are shown (tinted orange).
+- **The base** sits at the origin of the overworld as one icon tile, with an
+  old highway running south. Its interior (`shared/base.json`) is a 32×32 map
+  inside a perimeter wall with four gates, and has rooms with an NPC each:
+  - armory (weapons)
+  - armor shop
+  - infirmary (healing)
+  - decontamination (radiation)
+  - barracks
+  - supply depot
+  - command center
+
+  New characters start inside it, and dying in a fight wakes you in the
+  infirmary. The server sends the map when you enter, saves which map you're
+  on, and zombies can't come within 4 tiles of the icon. The NPCs talk about
+  their trade, but there is no money, inventory, health or radiation to trade
+  in yet. Edit `shared/base.json` to change the layout (one character per tile,
+  see its `legend`), rooms, NPCs or their lines; restart the server to apply.
 - **Radioactive zombies** spawn out in the wasteland, 12–18 tiles from a player
   (just off screen), more readily in hot zones. They shamble one tile every
   0.9s (players are about 7× faster) towards the nearest player within 20
-  tiles, and can't enter the base or the ring just outside its walls. Nothing
-  spawns within 16 tiles of the base. At most 4 gather around a player, and
+  tiles, and can't come within 4 tiles of the base icon. Nothing spawns within
+  16 tiles of the base. At most 4 gather around a player, and
   they despawn after 20s with nobody nearby. They are not saved across server
   restarts. Tuning lives in `DEFAULT_MONSTER_OPTIONS` in `server/src/monsters.ts`.
 - **Encounters.** When a zombie and a player end up on the same tile (either
@@ -71,7 +95,7 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   Zombies start where they stood on the overworld. Kill them all, or run past
   the rusty posts at the arena's edge to flee: you come out up to 3 tiles that
   way on the overworld and the survivors go back to their tiles. Die and you
-  wake up at the base. Afterwards you get 3 seconds' grace before anything can
+  wake up in the base's infirmary. Afterwards you get 3 seconds' grace before anything can
   catch you again.
 
   Controls: WASD/arrows move, mouse aims, left click or Space shoots
@@ -93,7 +117,9 @@ npm run map -- 12345 160 60 2   # ASCII preview of the generator: seed, width, h
 npm run tiles       # rebuild client/assets/tiles.png + sprites.png from server/tools/make_tiles.ts
 ```
 
-Client end-to-end test (with a server running):
+Client end-to-end test (with a server running). Add `--expect-base` to play a
+brand-new character through the base: start inside, talk to the gate guard,
+walk out, step onto the icon and press E to go back in.
 
 ```bash
 godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 --port 7777

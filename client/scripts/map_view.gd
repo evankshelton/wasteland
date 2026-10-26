@@ -48,7 +48,7 @@ func setup(owner_game: Node, tiles: Array) -> void:
 
 
 func open() -> void:
-	_center = Vector2(game.pos) + Vector2(0.5, 0.5)
+	_center = Vector2(game.overworld_pos()) + Vector2(0.5, 0.5)
 	show()
 	_update_info()
 	Net.send({"t": "map"})
@@ -80,7 +80,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_pressed(&"map_zoom_out", true):
 		_set_zoom(_zoom_index - 1, size / 2)
 	elif event.is_action_pressed(&"map_center"):
-		_center = Vector2(game.pos) + Vector2(0.5, 0.5)
+		_center = Vector2(game.overworld_pos()) + Vector2(0.5, 0.5)
 	else:
 		return
 	get_viewport().set_input_as_handled()
@@ -109,7 +109,7 @@ func on_index(coords: Array) -> void:
 		if not game.chunks.has(key):
 			_queue.append(key)
 	# Nearest first, so the area around the player fills in before the far reaches.
-	var here: Vector2i = game.chunk_of(game.pos)
+	var here: Vector2i = game.chunk_of(game.overworld_pos())
 	_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		return (a - here).length_squared() < (b - here).length_squared())
 	_total = _queue.size()
@@ -201,7 +201,7 @@ func _draw() -> void:
 		draw_rect(Rect2(p - Vector2(marker, marker) * 0.35, Vector2(marker, marker) * 0.7), ZOMBIE_COLOR)
 
 	# The player: a blinking square with crosshairs so it's findable when zoomed out.
-	var me := _world_to_screen(Vector2(game.pos) + Vector2(0.5, 0.5))
+	var me := _world_to_screen(Vector2(game.overworld_pos()) + Vector2(0.5, 0.5))
 	var color := PLAYER_COLOR if _blink < 0.6 else Color.WHITE
 	for arm: Vector2 in [Vector2.LEFT, Vector2.RIGHT, Vector2.UP, Vector2.DOWN]:
 		draw_line(me + arm * marker, me + arm * marker * 2.5, Color.BLACK, 4.0)
@@ -234,7 +234,7 @@ func _texture_for(key: Vector2i) -> ImageTexture:
 func _update_info() -> void:
 	var mouse := get_local_mouse_position()
 	var tile := Vector2i(_screen_to_world(mouse).floor())
-	var id: int = game.tile_at(tile)
+	var id: int = game.overworld_tile_at(tile)
 	var terrain: String = game.tile_names[id] if id >= 0 else "Uncharted"
 	var z := _zoom()
 	var zoom_text := "%dx" % int(z) if z >= 1.0 else "1/%dx" % int(1.0 / z)

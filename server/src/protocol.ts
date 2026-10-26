@@ -1,7 +1,7 @@
 // Wire protocol: one JSON object per WebSocket text message, discriminated by `t`.
 // Keep in sync with client/scripts/net.gd and docs/PROTOCOL.md.
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** Most chunk coordinates a client may ask for in one map_chunks request. */
 export const MAP_BATCH_MAX = 256;
@@ -21,7 +21,8 @@ export type ClientMsg =
   | { t: "move"; dir: Dir; seq: number }
   | { t: "map" }
   | { t: "map_chunks"; coords: [number, number][] }
-  | { t: "encounter_end"; id: number; result: EncounterResult; killed: number[]; dir?: Dir };
+  | { t: "encounter_end"; id: number; result: EncounterResult; killed: number[]; dir?: Dir }
+  | { t: "enter" }; // go into the base while standing on its icon
 
 export type EncounterResult = "victory" | "fled" | "died";
 const RESULTS: readonly string[] = ["victory", "fled", "died"];
@@ -60,6 +61,22 @@ export type ServerMsg =
       enemies: { id: number; kind: string; dx: number; dy: number }[];
     }
   | { t: "encounter_over"; id: number; result: EncounterResult; x: number; y: number }
+  // Which map the player is on. Sent after welcome and whenever it changes;
+  // x/y (and later "you" and "player" messages) are in that map's coordinates.
+  | { t: "location"; kind: "overworld"; x: number; y: number }
+  | {
+      t: "location";
+      kind: "base";
+      name: string;
+      width: number;
+      height: number;
+      tiles: string; // base64, row-major tile ids
+      x: number;
+      y: number;
+      npcs: { id: number; name: string; role: string; service: string; x: number; y: number; lines: string[] }[];
+      rooms: { name: string; x: number; y: number; w: number; h: number }[];
+    }
+  | { t: "notice"; text: string }
   | { t: "error"; code: string; message: string };
 
 const NAME_RE = /^[A-Za-z0-9 _-]{2,16}$/;
@@ -84,6 +101,8 @@ export function parseClientMsg(raw: string): ClientMsg | undefined {
       return { t: "move", dir: o.dir as Dir, seq: typeof o.seq === "number" ? o.seq : 0 };
     case "map":
       return { t: "map" };
+    case "enter":
+      return { t: "enter" };
     case "map_chunks": {
       if (!Array.isArray(o.coords) || o.coords.length > MAP_BATCH_MAX) return undefined;
       const coords: [number, number][] = [];
