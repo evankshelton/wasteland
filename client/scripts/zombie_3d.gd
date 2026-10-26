@@ -15,7 +15,7 @@ signal attacked(damage: float)
 
 const MODEL_PATH := "res://models/zombie/zombie_rigged.scn"
 const ATTACK_RANGE := 1.6
-const ATTACK_DAMAGE := 12.0
+const ATTACK_DAMAGE := 3.0 ## against 6-12 starting hit points
 const ATTACK_INTERVAL := 1.1
 const MAX_HEALTH := 100.0
 ## Ground speed (m/s) the walk animation matches at 1x. The bake measures the

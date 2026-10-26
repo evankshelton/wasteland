@@ -8,12 +8,17 @@ extends Node
 
 signal joined(welcome: Dictionary)
 signal disconnected(reason: String)
+## The player's character changed: a reroll, accepting it, XP, a level, health...
+signal character_changed(character: Dictionary)
 
-const PROTOCOL_VERSION := 5
+const PROTOCOL_VERSION := 6
 const CONNECT_TIMEOUT_MS := 8000
 
 ## The server's welcome message while joined, otherwise empty.
 var welcome: Dictionary = {}
+## The player's character (abilities, level, XP, health); created is false
+## until a roll is accepted. See server/src/character.ts.
+var character: Dictionary = {}
 var last_disconnect_reason := ""
 
 var _ws: WebSocketPeer
@@ -51,6 +56,7 @@ func close() -> void:
 	_was_open = false
 	_server_error = ""
 	welcome = {}
+	character = {}
 	_inbox.clear()
 
 
@@ -109,8 +115,12 @@ func _receive(msg: Dictionary) -> void:
 	match msg.t:
 		"welcome":
 			welcome = msg
+			character = msg.character
 			Prefs.save_token(_host, _port, _player_name, str(msg.token))
 			joined.emit(msg)
+		"character":
+			character = msg.character
+			character_changed.emit(character)
 		"error":
 			_server_error = str(msg.get("message", "The server reported an error."))
 		_:

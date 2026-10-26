@@ -22,6 +22,9 @@ const OTHER_TINT := Color(1.0, 0.6, 0.3)
 const ZOMBIE_REGION := Rect2(16, 0, 16, 16) ## sprites.png column 1
 const ZOMBIE_STEP_TIME := 0.35 ## seconds to animate one shambling step
 const NPC_TINT := Color(0.55, 0.85, 1.0)
+## Level-up choices: [character key, ability for the server, label].
+const RAISE_CHOICES := [["str", "str", "Strength"], ["dex", "dex", "Dexterity"], ["int", "int", "Intelligence"], ["maxHp", "hp", "Hit Points"]]
+const RAISE_BY := 2
 const LOG_LINES := 6
 
 ## Input action -> [protocol direction, tile delta]. Rebind keys in Project Settings > Input Map.
@@ -70,6 +73,9 @@ var _lost := false
 @onready var dialog_name: Label = %DialogName
 @onready var dialog_text: Label = %DialogText
 @onready var dialog_hint: Label = %DialogHint
+@onready var level_up: Control = %LevelUp
+@onready var level_up_box: VBoxContainer = %LevelUpBox
+@onready var sheet_label: Label = %SheetLabel
 @onready var players_root: Node2D = %Players
 @onready var monsters_root: Node2D = %Monsters
 @onready var avatar: Sprite2D = %Avatar
@@ -109,6 +115,8 @@ func _ready() -> void:
 	%QuitButton.pressed.connect(get_tree().quit)
 	%BackButton.pressed.connect(_leave)
 	Net.disconnected.connect(_on_disconnected)
+	Net.character_changed.connect(_on_character_changed)
+	_on_character_changed(Net.character)
 
 	_set_pos(Vector2i(int(welcome.x), int(welcome.y)), true)
 	_log("Welcome, %s." % welcome.name)
@@ -137,6 +145,10 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 	elif pause_menu.visible:
 		return
+	elif level_up.visible and event is InputEventKey and event.pressed and not event.echo \
+			and event.physical_keycode >= KEY_1 and event.physical_keycode <= KEY_4:
+		_raise(int(event.physical_keycode - KEY_1))
+		get_viewport().set_input_as_handled()
 	elif event.is_action_pressed(&"enter"):
 		use()
 		get_viewport().set_input_as_handled()
@@ -348,6 +360,8 @@ func _npc_in_reach() -> Dictionary:
 
 
 func _talk(npc: Dictionary) -> void:
+	# Ask for their service too; the server does it if they have a working one (the medic heals).
+	Net.send({"t": "service", "npc": int(npc.id)})
 	_dialog_npc = npc
 	_dialog_line = 0
 	dialog_name.text = "%s, %s" % [npc.name, npc.role]
@@ -389,7 +403,7 @@ func _start_encounter(msg: Dictionary) -> void:
 
 
 func _on_encounter_finished(result: String, killed: Array, dir: String, id: int) -> void:
-	var msg := {"t": "encounter_end", "id": id, "result": result, "killed": killed}
+	var msg := {"t": "encounter_end", "id": id, "result": result, "killed": killed, "hp": encounter.health}
 	if not dir.is_empty():
 		msg.dir = dir
 	Net.send(msg)
@@ -514,9 +528,54 @@ func _upsert_monster(id: int, p: Vector2i) -> void:
 	monster_positions[id] = p
 
 
+# ---- character ----
+
+func _on_character_changed(c: Dictionary) -> void:
+	_update_status()
+	sheet_label.text = _sheet(c)
+	level_up.visible = int(c.get("points", 0)) > 0
+	if not level_up.visible:
+		return
+	for child in level_up_box.get_children():
+		child.queue_free()
+	var title := Label.new()
+	title.text = "LEVEL %d!  Raise an ability (%d point%s)" % [c.level, c.points, "" if int(c.points) == 1 else "s"]
+	title.add_theme_color_override(&"font_color", Color(1, 1, 0.33))
+	level_up_box.add_child(title)
+	for i in RAISE_CHOICES.size():
+		var choice: Array = RAISE_CHOICES[i]
+		var value := int(c[choice[0]])
+		var button := Button.new()
+		button.text = "%d. %s  %d -> %d" % [i + 1, choice[2], value, mini(value + RAISE_BY, 100)]
+		button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+		button.focus_mode = Control.FOCUS_NONE # Arrow keys stay for walking.
+		button.disabled = value >= 100
+		button.pressed.connect(_raise.bind(i))
+		level_up_box.add_child(button)
+
+
+func _raise(choice: int) -> void:
+	Net.send({"t": "raise", "ability": RAISE_CHOICES[choice][1]})
+
+
+## "Lv 3  HP 9/12  XP 340/600"
+func _vitals(c: Dictionary) -> String:
+	if c.is_empty():
+		return ""
+	var level := int(c.level)
+	return "Lv %d  HP %d/%d  XP %d/%d" % [level, c.hp, c.maxHp, c.xp, 50 * (level + 1) * level]
+
+
+func _sheet(c: Dictionary) -> String:
+	if c.is_empty():
+		return ""
+	return "%s\nSTR %d   DEX %d   INT %d" % [_vitals(c), c.str, c.dex, c.int]
+
+
 func _update_status() -> void:
+	var vitals := "   " + _vitals(Net.character)
 	if location == "base":
-		status_label.text = "%s   %s: %s" % [Net.welcome.get("name", ""), base_info.get("name", "Base"), _room_at(pos)]
+		status_label.text = "%s   %s: %s%s" % [Net.welcome.get("name", ""), base_info.get("name", "Base"), _room_at(pos), vitals]
 		return
 	var tile := tile_at(pos)
 	var where := tile_names[tile] if tile >= 0 else "..."
@@ -527,7 +586,7 @@ func _update_status() -> void:
 	if pos.x != 0:
 		to_base.append("%d%s" % [absi(pos.x), "W" if pos.x > 0 else "E"])
 	var base_text := "   Base: %s" % " ".join(to_base) if not to_base.is_empty() else ""
-	status_label.text = "%s   (%d, %d)   %s%s" % [Net.welcome.get("name", ""), pos.x, pos.y, where, base_text]
+	status_label.text = "%s   (%d, %d)   %s%s%s" % [Net.welcome.get("name", ""), pos.x, pos.y, where, base_text, vitals]
 
 
 func _room_at(p: Vector2i) -> String:

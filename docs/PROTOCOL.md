@@ -1,4 +1,4 @@
-# Wasteland wire protocol (v5)
+# Wasteland wire protocol (v6)
 
 One WebSocket per player (`ws://<host>:<port>`). Every message is a UTF-8 text
 frame holding one JSON object with a `t` field naming its type.
@@ -21,16 +21,21 @@ Source of truth: `server/src/protocol.ts` (server) and `client/scripts/net.gd` (
 |---------|----------------------------------------|-------|
 | `hello` | `v` (protocol version), `name`, `token`? | First message. `name` is 2–16 of `A-Z a-z 0-9 space - _`. Omit or send `""` for `token` on a new character. |
 | `move`  | `dir` (`up`/`down`/`left`/`right`), `seq` | One step. The server always answers with `you` echoing `seq`. In the base, stepping off the edge leaves it: `you` (with the new overworld position) then `location`. |
+| `reroll` | — | Roll new abilities. Only before the character is accepted; answered with `character`. |
+| `accept` | — | Keep the current roll. Answered with `character` (now `created`), then `location` and the rest of the world. |
+| `raise` | `ability` (`str`/`dex`/`int`/`hp`) | Spend a level-up point: +2 to that ability. Answered with `character`; ignored with no points or at 100. |
+| `service` | `npc` (NPC id) | Ask a base NPC in reach (next to you or across a counter) for their service. The medic heals to full; others do nothing yet. Clients send it whenever the player talks to an NPC. |
 | `enter` | — | Go into the base while standing on its icon on the overworld. Answered with `location` (or a `notice` if there's nothing to enter). |
 | `map`   | — | Asks for the world map index; answered with `map_index`. |
 | `map_chunks` | `coords` (array of `[cx, cy]`, at most 256) | Fetch chunks for the world map. Answered with a `map_chunk` per chunk that has been generated (others are skipped, never generated), then `map_batch_done`. |
-| `encounter_end` | `id`, `result` (`victory`/`fled`/`died`), `killed` (monster ids), `dir`? | How the first-person fight ended. `dir` (`up`/`down`/`left`/`right`) is the arena edge the player fled across. `victory` is refused unless every enemy is in `killed`. |
+| `encounter_end` | `id`, `result` (`victory`/`fled`/`died`), `killed` (monster ids), `dir`?, `hp`? | How the first-person fight ended. `dir` (`up`/`down`/`left`/`right`) is the arena edge the player fled across; `hp` is the health they finished with (it can only go down; dying restores it). `victory` is refused unless every enemy is in `killed`. Kills and victories award XP. |
 
 ## Server → client
 
 | `t`           | Fields | Notes |
 |---------------|--------|-------|
-| `welcome`     | `id`, `name`, `token`, `x`, `y`, `chunkSize`, `tiles[]`, `motd` | Reply to `hello`. Store `token`: it is required to reclaim this name later. `tiles[]` is `{id, key, name, passable, color}`; `color` is the terrain's world-map colour. |
+| `welcome`     | `id`, `name`, `token`, `x`, `y`, `chunkSize`, `tiles[]`, `motd`, `character` | Reply to `hello`. Store `token`: it is required to reclaim this name later. `tiles[]` is `{id, key, name, passable, color}`; `color` is the terrain's world-map colour. If `character.created` is false the player is rolling a new character: nothing else is sent, and only `reroll`/`accept` are answered, until they accept. |
+| `character`   | `character`: `{created, level, xp, str, dex, int, maxHp, hp, points}` | The player's character after any change: a roll, accepting it, XP, a level (`points` to spend), raising an ability, healing or damage. |
 | `location`    | `kind` (`overworld`/`base`), `x`, `y`, and for the base: `name`, `width`, `height`, `tiles`, `npcs[]`, `rooms[]` | Which map the player is on. Sent right after `welcome` and whenever it changes (entering, leaving, dying). For the base, `tiles` is base64 of `width × height` tile ids, row-major; `npcs[]` is `{id, name, role, service, x, y, lines[]}` (NPCs block their tile; `lines` are what they say); `rooms[]` is `{name, x, y, w, h}`. |
 | `notice`      | `text` | Something for the message log. |
 | `chunk`       | `cx`, `cy`, `tiles` | `tiles` is base64 of `chunkSize²` bytes, row-major (`index = ly*chunkSize + lx`). Sent for every chunk within 2 chunks of the player that this connection hasn't received yet. |

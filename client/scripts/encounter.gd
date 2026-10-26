@@ -27,14 +27,13 @@ const TREE_HEIGHT := Vector2(8.0, 16.0) ## metres, min and max
 const TREE_SIZES := 5
 const TREE_SPACING := 7.0 ## minimum metres between tree trunks
 const TREE_BATCH_CELLS := 3 ## trees are batched per 3x3-cell block so distant blocks can cull and use LODs
-const PLAYER_SPEED := 5.0
+## Running speed and fire rate come from dexterity, damage from strength and
+## health from the hit points ability (see setup()).
 const SWAMP_SPEED_FACTOR := 0.55
 const MOUSE_SENSITIVITY := 0.0025
-const FIRE_INTERVAL := 0.2
-const SHOT_DAMAGE := 34.0
+
 const SHOT_RANGE := 250.0
-const MAX_HEALTH := 100.0
-const RADIATION_DPS := 4.0
+const RADIATION_DPS := 0.5
 const GRAVITY := 20.0
 const MAX_GLOW_LIGHTS := 8
 const END_DELAY := 1.6 ## seconds the outcome banner shows before returning to the overworld
@@ -48,7 +47,11 @@ const SOLID := ["mountains", "ruins", "base_wall", "water"]
 
 var radius := 8
 var half_extent := 34.0
-var health := MAX_HEALTH
+var max_health := 10.0
+var health := 10.0
+var shot_damage := 42.0
+var fire_interval := 0.28
+var run_speed := 4.7
 var enemies := {} ## monster id -> Zombie3D
 var killed: Array[int] = []
 
@@ -88,6 +91,13 @@ static var _tree_models_loaded := false
 
 ## `game` supplies the overworld tiles (tile_at); `msg` is the server's encounter_start.
 func setup(game: Node, msg: Dictionary) -> void:
+	var c := Net.character
+	max_health = float(c.get("maxHp", 10))
+	health = clampf(float(c.get("hp", max_health)), 1.0, max_health)
+	shot_damage = 30.0 + float(c.get("str", 12)) # 3 shots per zombie at 12, 2 from 21, 1 from 70.
+	fire_interval = clampf(0.3 - float(c.get("dex", 12)) * 0.002, 0.1, 0.3)
+	run_speed = 4.5 + float(c.get("dex", 12)) * 0.02
+	health_bar.max_value = max_health
 	radius = int(msg.radius)
 	half_extent = (radius + 0.5) * CELL
 	_rng.seed = int(msg.seed)
@@ -601,7 +611,7 @@ func _physics_process(delta: float) -> void:
 	var dir := basis.x * input.x + basis.z * input.y
 	dir.y = 0.0
 	var key: String = _cells.get(_cell_at(player.global_position), "")
-	var speed := PLAYER_SPEED * (SWAMP_SPEED_FACTOR if key == "swamp" else 1.0)
+	var speed := run_speed * (SWAMP_SPEED_FACTOR if key == "swamp" else 1.0)
 	var horizontal := dir.normalized() * speed if dir.length() > 0.01 else Vector3.ZERO
 	player.velocity.x = horizontal.x
 	player.velocity.z = horizontal.z
@@ -619,7 +629,7 @@ func _physics_process(delta: float) -> void:
 
 ## Hitscan shot from the centre of the screen.
 func fire() -> void:
-	_fire_cooldown = FIRE_INTERVAL
+	_fire_cooldown = fire_interval
 	muzzle_flash.light_energy = 4.0
 	gun.position.z = -0.68 # Recoil kick; eases back in _process.
 	var from := camera.global_position
@@ -630,7 +640,7 @@ func fire() -> void:
 		return
 	_spark(hit.position)
 	if hit.collider is Zombie3D:
-		hit.collider.hit(SHOT_DAMAGE)
+		hit.collider.hit(shot_damage)
 
 
 func _spark(at: Vector3) -> void:
@@ -672,7 +682,7 @@ func _on_zombie_died(z: Zombie3D) -> void:
 func _update_hud() -> void:
 	health_bar.value = health
 	var left := enemies.size() - killed.size()
-	enemies_label.text = "ZOMBIES: %d   HEALTH: %d" % [left, ceili(health)]
+	enemies_label.text = "ZOMBIES: %d   HEALTH: %d/%d" % [left, ceili(health), int(max_health)]
 
 
 func _end(result: String, dir: String) -> void:

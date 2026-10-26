@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { WebSocket } from "ws";
 import { BaseMap } from "../src/base.ts";
+import { XP, gainXp, raise, rollCharacter, xpForLevel } from "../src/character.ts";
 import { DEFAULT_MONSTER_OPTIONS, Monsters, inSafeZone, type MonsterOptions } from "../src/monsters.ts";
 import { GameServer } from "../src/server.ts";
 import { Storage } from "../src/storage.ts";
@@ -17,7 +18,7 @@ const dir = mkdtempSync(join(tmpdir(), "wasteland-test-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 const BASE_MAP = BaseMap.load();
-const V = 5; // protocol version
+const V = 6; // protocol version
 let nextPort = 17777 + Math.floor(Math.random() * 1000);
 
 async function boot(dbPath: string, monsters: Partial<MonsterOptions> = {}) {
@@ -42,6 +43,11 @@ async function boot(dbPath: string, monsters: Partial<MonsterOptions> = {}) {
 
 type Client = Awaited<ReturnType<typeof connect>>;
 
+/** The live state of the one player on a test server, for setting up situations directly. */
+function onlyPlayer(server: GameServer): any {
+  return (server as any).byPlayerId.values().next().value.player;
+}
+
 /** A tiny client that queues incoming messages so tests can await them in order. */
 async function connect(port: number) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -56,6 +62,7 @@ async function connect(port: number) {
   const next = () => new Promise<any>((res) => (inbox.length ? res(inbox.shift()) : waiters.push(res)));
   let seq = 0;
   const client = {
+    next,
     send: (m: object) => ws.send(JSON.stringify(m)),
     async until(t: string) {
       for (;;) {
@@ -78,13 +85,21 @@ async function connect(port: number) {
   return client;
 }
 
-/** Joins and returns the welcome and the first location (new characters start inside the base). */
+/**
+ * Joins (accepting the first roll if the character is new) and returns the
+ * welcome, the character and the first location (new characters start inside the base).
+ */
 async function enterGame(port: number, name: string, token?: string) {
   const c = await connect(port);
   c.send({ t: "hello", v: V, name, token });
   const welcome = await c.until("welcome");
+  let character = welcome.character;
+  if (!character.created) {
+    c.send({ t: "accept" });
+    character = (await c.until("character")).character;
+  }
   const location = await c.until("location");
-  return { c, welcome, location };
+  return { c, welcome, location, character };
 }
 
 /** A new character leaves the base by the south gate (onto the highway at (0, 1)) and walks down it to (0, 12). */
@@ -259,6 +274,90 @@ test("the world map lists generated chunks and never generates new ones", async 
   await srv.stop();
 });
 
+// ---- characters ----
+
+test("abilities roll 6-18 averaging 12, hit points 6-12", () => {
+  let sum = 0;
+  const n = 10_000;
+  for (let i = 0; i < n; i++) {
+    const c = rollCharacter();
+    for (const v of [c.str, c.dex, c.int]) {
+      assert.ok(v >= 6 && v <= 18, `ability ${v} in 6..18`);
+      sum += v;
+    }
+    assert.ok(c.maxHp >= 6 && c.maxHp <= 12 && c.hp === c.maxHp, `hit points ${c.maxHp} in 6..12`);
+    assert.deepEqual([c.level, c.xp, c.points, c.created], [1, 0, 0, false]);
+  }
+  const avg = sum / (3 * n);
+  assert.ok(Math.abs(avg - 12) < 0.15, `average ${avg.toFixed(2)} is about 12`);
+});
+
+test("experience levels you up, and each level raises an ability of your choice", () => {
+  const c = { ...rollCharacter(), int: 12 }; // No intelligence bonus.
+  assert.deepEqual([xpForLevel(2), xpForLevel(3), xpForLevel(4)], [100, 300, 600]);
+  assert.equal(raise(c, "str"), false, "no points to spend at level 1");
+  assert.deepEqual(gainXp(c, 99), { gained: 99, levels: 0 });
+  assert.deepEqual(gainXp(c, 210), { gained: 210, levels: 2 }, "309 XP: straight through level 2 to 3");
+  assert.deepEqual([c.level, c.points], [3, 2]);
+  const str = c.str;
+  const hp = c.maxHp;
+  assert.ok(raise(c, "str"));
+  assert.ok(raise(c, "hp"));
+  assert.deepEqual([c.str, c.maxHp, c.hp, c.points], [str + 2, hp + 2, hp + 2, 0]);
+  assert.equal(raise(c, "dex"), false, "points spent");
+
+  const smart = { ...rollCharacter(), int: 32 };
+  assert.equal(gainXp(smart, 100).gained, 120, "+1% XP per intelligence above 12");
+  const maxed = { ...rollCharacter(), str: 99, points: 2 };
+  assert.ok(raise(maxed, "str"));
+  assert.equal(maxed.str, 100, "abilities cap at 100");
+  assert.equal(raise(maxed, "str"), false);
+});
+
+test("a new player rolls, can reroll as often as they like, and enters the world only on accepting", async () => {
+  const srv = await boot(":memory:");
+  const c = await connect(srv.port);
+  c.send({ t: "hello", v: V, name: "Roller" });
+  const welcome = await c.until("welcome");
+  assert.equal(welcome.character.created, false);
+  assert.equal(welcome.character.level, 1);
+
+  c.send({ t: "move", dir: "down", seq: 1 }); // Ignored: not in the world yet.
+  for (let i = 0; i < 5; i++) {
+    c.send({ t: "reroll" });
+    const m = await c.next();
+    assert.equal(m.t, "character", "only rolls come back while creating (no location, no move reply)");
+    const ch = m.character;
+    assert.ok([ch.str, ch.dex, ch.int].every((v: number) => v >= 6 && v <= 18) && ch.maxHp >= 6 && ch.maxHp <= 12);
+  }
+  c.send({ t: "accept" });
+  const accepted = (await c.until("character")).character;
+  assert.equal(accepted.created, true);
+  const loc = await c.until("location");
+  assert.equal(loc.kind, "base");
+
+  c.send({ t: "reroll" }); // Too late: ignored.
+  c.send({ t: "map" });
+  assert.equal((await c.next()).t, "map_index", "no reroll after accepting");
+  await c.close();
+
+  // Reconnecting keeps the accepted character.
+  const again = await enterGame(srv.port, "Roller", welcome.token);
+  assert.deepEqual(again.welcome.character, accepted);
+  await again.c.close();
+  await srv.stop();
+});
+
+test("exploring new land earns experience", async () => {
+  const srv = await boot(":memory:");
+  const { c } = await enterGame(srv.port, "Scout");
+  for (let i = 0; i < 4; i++) await c.move("down"); // Out of the base: the first chunks anyone has seen.
+  const ch = (await c.until("character")).character;
+  assert.ok(ch.xp >= XP.explore, `earned ${ch.xp} XP exploring`);
+  await c.close();
+  await srv.stop();
+});
+
 // ---- zombies ----
 
 function zombieWorld(opts: Partial<MonsterOptions> = {}) {
@@ -362,10 +461,18 @@ test("encounters end in victory, flight or death", async () => {
   let start = await c.until("encounter_start");
   assert.equal(start.enemies.length, 2);
 
-  c.send({ t: "encounter_end", id: start.id, result: "victory", killed: [1, 2] });
+  const before = onlyPlayer(srv.server).char;
+  const xpBefore = before.xp;
+  const hpBefore = before.hp;
+  c.send({ t: "encounter_end", id: start.id, result: "victory", killed: [1, 2], hp: hpBefore - 1 });
   let over = await c.until("encounter_over");
   assert.deepEqual([over.result, over.x, over.y], ["victory", 0, 13]);
   assert.equal(mons.all.size, 0, "the dead stay dead");
+  assert.match((await c.until("notice")).text, /XP/);
+  let ch = (await c.until("character")).character;
+  const bonus = 1 + Math.max(0, ch.int - 12) / 100;
+  assert.equal(ch.xp - xpBefore, Math.round((2 * XP.kill + XP.victory) * bonus), "XP for 2 kills and a victory");
+  assert.equal(ch.hp, hpBefore - 1, "wounds carry over");
 
   // Flee south: we come out 3 tiles that way and the survivor goes back to the map.
   await new Promise((r) => setTimeout(r, 350)); // grace period
@@ -373,8 +480,10 @@ test("encounters end in victory, flight or death", async () => {
   addZombie(mons, 4, 0, 19, Date.now() + 60_000);
   await c.move("down");
   start = await c.until("encounter_start");
-  c.send({ t: "encounter_end", id: start.id, result: "fled", killed: [3], dir: "down" });
+  c.send({ t: "encounter_end", id: start.id, result: "fled", killed: [3], dir: "down", hp: 999 });
   over = await c.until("encounter_over");
+  ch = (await c.until("character")).character;
+  assert.equal(ch.hp, hpBefore - 1, "a client can't heal itself by reporting more health");
   assert.deepEqual([over.result, over.x, over.y], ["fled", 0, 17]);
   assert.deepEqual([...mons.all.keys()], [4], "survivor returned to the overworld");
   const back = mons.all.get(4)!;
@@ -396,11 +505,34 @@ test("encounters end in victory, flight or death", async () => {
   addZombie(mons, 6, 0, 13, Date.now() + 60_000);
   await d.move("down");
   start = await d.until("encounter_start");
-  d.send({ t: "encounter_end", id: start.id, result: "died", killed: [] });
+  d.send({ t: "encounter_end", id: start.id, result: "died", killed: [], hp: 0 });
   over = await d.until("encounter_over");
   assert.equal(over.result, "died");
+  ch = (await d.until("character")).character;
+  assert.equal(ch.hp, ch.maxHp, "wake up healed");
   const loc = await d.until("location");
   assert.deepEqual([loc.kind, loc.x, loc.y], ["base", BASE_MAP.respawn.x, BASE_MAP.respawn.y]);
   await d.close();
+  await srv.stop();
+});
+
+test("Doc Ellis heals you in the infirmary", async () => {
+  const srv = await boot(":memory:");
+  const { c } = await enterGame(srv.port, "Patient");
+  const p = onlyPlayer(srv.server);
+  p.char.hp = 1; // Took a beating out there.
+  const doc = BASE_MAP.npcs.find((n) => n.service === "healing")!;
+  c.send({ t: "service", npc: doc.id });
+  c.send({ t: "map" });
+  assert.equal((await c.next()).t, "map_index", "too far away: nothing happens");
+
+  // Respawn point is the cot side of the infirmary, across the counter from the medic.
+  p.bx = doc.x - 2;
+  p.by = doc.y;
+  c.send({ t: "service", npc: doc.id });
+  const healed = (await c.until("character")).character;
+  assert.equal(healed.hp, healed.maxHp);
+  assert.match((await c.until("notice")).text, /patches you up/);
+  await c.close();
   await srv.stop();
 });

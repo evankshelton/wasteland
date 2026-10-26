@@ -4,6 +4,7 @@ import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { DIR_DELTA, PROTOCOL_VERSION, parseClientMsg, validName, type ClientMsg, type ServerMsg } from "./protocol.ts";
 import type { BaseMap } from "./base.ts";
+import { XP, gainXp, raise, rollCharacter, type Character } from "./character.ts";
 import { Monsters, inSafeZone, type Monster, type MonsterOptions } from "./monsters.ts";
 import type { Location, Storage } from "./storage.ts";
 import { T, TILE_DEFS, isPassable } from "./tiles.ts";
@@ -61,6 +62,7 @@ interface Player {
   /** Position on the base map while loc is "base". */
   bx: number;
   by: number;
+  char: Character;
 }
 
 /** Which map a player is on and where, in that map's coordinates. */
@@ -158,6 +160,8 @@ export class GameServer {
   }
 
   private onMessage(s: Session, msg: ClientMsg): void {
+    const creating = s.player !== undefined && !s.player.char.created;
+    if (creating && msg.t !== "reroll" && msg.t !== "accept") return; // Still rolling: not in the world yet.
     switch (msg.t) {
       case "hello":
         return this.onHello(s, msg);
@@ -171,6 +175,14 @@ export class GameServer {
         return this.onEncounterEnd(s, msg);
       case "enter":
         return this.onEnter(s);
+      case "reroll":
+        return this.onReroll(s);
+      case "accept":
+        return this.onAccept(s);
+      case "raise":
+        return this.onRaise(s, msg.ability);
+      case "service":
+        return this.onService(s, msg.npc);
     }
   }
 
@@ -198,7 +210,7 @@ export class GameServer {
 
     // One live session per character: the newest connection wins and takes
     // over the live position (the stored one may be a few seconds stale).
-    let pos: Omit<Player, "id" | "name"> = { x: rec.x, y: rec.y, loc: rec.loc, bx: rec.bx, by: rec.by };
+    let pos: Omit<Player, "id" | "name" | "char"> = { x: rec.x, y: rec.y, loc: rec.loc, bx: rec.bx, by: rec.by };
     if (pos.loc === "base" && !this.base.walkable(pos.bx, pos.by)) {
       ({ x: pos.bx, y: pos.by } = this.base.entry); // The base layout changed under them.
     }
@@ -211,7 +223,13 @@ export class GameServer {
       this.onClose(existing);
     }
 
-    s.player = { id: rec.id, name: rec.name, ...pos };
+    // First time (or first since characters existed): roll one to accept or reroll.
+    let char = existing?.player?.char ?? rec.char;
+    if (!char) {
+      char = rollCharacter();
+      this.storage.saveCharacter(rec.id, char);
+    }
+    s.player = { id: rec.id, name: rec.name, ...pos, char };
     this.byPlayerId.set(rec.id, s);
     const { x, y } = s.player;
     const here = whereIs(s.player);
@@ -227,11 +245,80 @@ export class GameServer {
       chunkSize: CHUNK_SIZE,
       tiles: TILE_DEFS.map(({ id, key, name, passable, color }) => ({ id, key, name, passable, color })),
       motd: this.opts.motd,
+      character: char,
     });
+    if (char.created) this.enterWorld(s);
+  }
+
+  /** Put a player with a finished character into the world they left. */
+  private enterWorld(s: Session): void {
     this.sendLocation(s);
-    if (s.player.loc === "overworld") this.streamChunks(s);
+    if (s.player!.loc === "overworld") this.streamChunks(s);
     this.updateVisibility(s);
     this.syncMonsters(s);
+  }
+
+  private onReroll(s: Session): void {
+    const p = s.player;
+    if (!p || p.char.created) return; // Rolls are final once accepted.
+    p.char = rollCharacter();
+    this.storage.saveCharacter(p.id, p.char);
+    this.sendCharacter(s);
+  }
+
+  private onAccept(s: Session): void {
+    const p = s.player;
+    if (!p || p.char.created) return;
+    p.char.created = true;
+    this.storage.saveCharacter(p.id, p.char);
+    const c = p.char;
+    log(`[player] "${p.name}" accepted STR ${c.str} DEX ${c.dex} INT ${c.int} HP ${c.maxHp}`);
+    this.sendCharacter(s);
+    this.enterWorld(s);
+  }
+
+  private onRaise(s: Session, ability: Parameters<typeof raise>[1]): void {
+    const p = s.player;
+    if (!p || !raise(p.char, ability)) return;
+    this.storage.saveCharacter(p.id, p.char);
+    this.sendCharacter(s);
+  }
+
+  /** Talking to an NPC: the ones with a working service do it. */
+  private onService(s: Session, npcId: number): void {
+    const p = s.player;
+    if (!p || p.loc !== "base") return;
+    const npc = this.base.npcs.find((n) => n.id === npcId);
+    // In reach: next to them, or across a counter.
+    if (!npc || Math.abs(npc.x - p.bx) + Math.abs(npc.y - p.by) > 2) return;
+    if (npc.service === "healing") {
+      if (p.char.hp >= p.char.maxHp) {
+        this.send(s, { t: "notice", text: `${npc.name}: "You're in one piece. Go on."` });
+        return;
+      }
+      p.char.hp = p.char.maxHp;
+      this.storage.saveCharacter(p.id, p.char);
+      this.sendCharacter(s);
+      this.send(s, { t: "notice", text: `${npc.name} patches you up. Hit points restored to ${p.char.maxHp}.` });
+    }
+  }
+
+  /** Award experience and announce it (and any level gained). */
+  private award(s: Session, base: number, why: string): void {
+    const p = s.player!;
+    if (base <= 0) return;
+    const { gained, levels } = gainXp(p.char, base);
+    this.storage.saveCharacter(p.id, p.char);
+    if (why) this.send(s, { t: "notice", text: `+${gained} XP (${why}).` });
+    if (levels > 0) {
+      log(`[player] "${p.name}" reached level ${p.char.level}`);
+      this.send(s, { t: "notice", text: `You reached level ${p.char.level}! Choose an ability to raise.` });
+    }
+    this.sendCharacter(s);
+  }
+
+  private sendCharacter(s: Session): void {
+    this.send(s, { t: "character", character: s.player!.char });
   }
 
   /** Tell the client which map it's on (the whole map, for the base). */
@@ -403,8 +490,17 @@ export class GameServer {
 
     this.endEncounter(s, survivors);
     s.dirty = true;
-    log(`[encounter] "${p.name}" ${msg.result} (${killed.size} killed) -> (${p.x}, ${p.y})`);
+    const kills = enc.enemies.length - survivors.length;
+    log(`[encounter] "${p.name}" ${msg.result} (${kills} killed) -> (${p.x}, ${p.y})`);
+    // Health only goes down in a fight; dying means waking up healed in the infirmary.
+    const c = p.char;
+    if (msg.result === "died") c.hp = c.maxHp;
+    else if (msg.hp !== undefined) c.hp = Math.max(1, Math.min(c.hp, Math.ceil(msg.hp)));
+    this.storage.saveCharacter(p.id, c);
     this.send(s, { t: "encounter_over", id: enc.id, result: msg.result, x: p.x, y: p.y });
+    const xp = kills * XP.kill + (msg.result === "victory" ? XP.victory : 0);
+    if (xp > 0) this.award(s, xp, `${kills} zombie${kills === 1 ? "" : "s"} put down${msg.result === "victory" ? ", area cleared" : ""}`);
+    else this.sendCharacter(s);
     if (msg.result === "died") {
       // Carried back to the base and patched up in the infirmary.
       this.changeLocation(s, "base", this.base.respawn);
@@ -451,6 +547,7 @@ export class GameServer {
     const p = s.player;
     if (p) {
       this.storage.savePlayers([p]);
+      this.storage.saveCharacter(p.id, p.char);
       if (this.byPlayerId.get(p.id) === s) this.byPlayerId.delete(p.id);
       for (const other of this.sessions) {
         if (other.seenPlayers.delete(p.id)) this.send(other, { t: "player_left", id: p.id });
@@ -476,19 +573,23 @@ export class GameServer {
       }
     }
     wanted.sort((a, b) => Math.hypot(a[0] - pcx, a[1] - pcy) - Math.hypot(b[0] - pcx, b[1] - pcy));
+    let discovered = 0;
     for (const [cx, cy] of wanted) {
+      if (!this.world.existingChunk(cx, cy)) discovered++; // First to see this land.
       const tiles = this.world.chunk(cx, cy);
       s.sentChunks.add(`${cx},${cy}`);
       this.send(s, { t: "chunk", cx, cy, tiles: Buffer.from(tiles).toString("base64") });
     }
+    if (discovered > 0) this.award(s, discovered * XP.explore, "");
   }
 
   /** After `s` moved, joined or changed map, update who can see whom (same map, within view). */
   private updateVisibility(s: Session): void {
     const p = whereIs(s.player!);
     const { id, name } = s.player!;
+    if (!s.player!.char.created) return; // Not in the world yet.
     for (const other of this.sessions) {
-      if (other === s || !other.player) continue;
+      if (other === s || !other.player?.char.created) continue;
       const q = { ...whereIs(other.player), id: other.player.id, name: other.player.name };
       const near = p.loc === q.loc && Math.max(Math.abs(p.x - q.x), Math.abs(p.y - q.y)) <= this.opts.viewTiles;
       if (near) {
@@ -509,7 +610,7 @@ export class GameServer {
   private tick(): void {
     const now = Date.now();
     // Zombies only know about the overworld; the base is safe.
-    const sessions = [...this.sessions].filter((s) => s.player?.loc === "overworld");
+    const sessions = [...this.sessions].filter((s) => s.player?.loc === "overworld" && s.player.char.created);
     const { changed, removed, contacts } = this.monsters.tick(
       now,
       sessions.map((s) => ({ ...s.player!, targetable: !s.encounter && now >= s.graceUntil })),

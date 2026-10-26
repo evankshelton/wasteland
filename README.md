@@ -29,7 +29,9 @@ Options: `npm start -- --port 7777 --host 0.0.0.0 --db data/world.db --seed 1234
 
 **Client**: open `client/` in Godot 4.7 and press Play, or run
 `godot --path client`. Enter the server address, port and a name, then Connect.
-Move with the arrow keys or WASD. Esc opens the menu.
+The first time you join with a name you roll a character (see *Characters*
+below): reroll as often as you like, then accept. Move with the arrow keys or
+WASD. Esc opens the menu, which shows your character sheet.
 
 Stand on the base icon and press **E** to go inside. The base is its own small
 map, like an Ultima IV city: walk off any edge to leave, and you come out on
@@ -61,6 +63,27 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   saves player positions every 5 seconds, on disconnect and on shutdown.
   Reconnecting with the same name puts you back where you were.
 - Other players within 40 tiles on the same map are shown (tinted orange).
+- **Characters.** A new character is level 1 with four abilities, rolled by
+  the server: strength, dexterity and intelligence are 6–18 (6 plus two rolls
+  of 0–6, averaging 12) and hit points are 6–12. Players can reroll as often
+  as they like before accepting; after that the roll is final. Abilities top
+  out at 100.
+  - **Experience:** 25 XP per zombie killed, +10 for clearing an area, and +2
+    for each new piece of land you're the first to see. Intelligence adds +1%
+    XP per point above 12.
+  - **Levels:** reaching level *n* takes 50·*n*·(*n*−1) XP in total (100,
+    300, 600, 1000...). Each level gives a point to spend raising the ability
+    of your choice by 2, from a panel in the HUD (click it, or press 1–4).
+  - **In a fight:** strength is damage per shot (30 + STR, so a zombie takes
+    3 shots at 12 and 1 from 70), dexterity is fire rate and run speed, and
+    hit points are your health. Zombies claw for 3 and hot zones burn
+    0.5 HP/s.
+  - **Healing:** health carries over between fights. Doc Ellis in the base's
+    infirmary heals you to full when you talk to him, and dying wakes you
+    there at full health.
+
+  Rules live in `server/src/character.ts`. Characters created before this
+  existed roll a new one the next time they join.
 - **The base** sits at the origin of the overworld as one icon tile, with an
   old highway running south. Its interior (`shared/base.json`) is a 32×32 map
   inside a perimeter wall with four gates, and has rooms with an NPC each:
@@ -74,9 +97,9 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
 
   New characters start inside it, and dying in a fight wakes you in the
   infirmary. The server sends the map when you enter, saves which map you're
-  on, and zombies can't come within 4 tiles of the icon. The NPCs talk about
-  their trade, but there is no money, inventory, health or radiation to trade
-  in yet. Edit `shared/base.json` to change the layout (one character per tile,
+  on, and zombies can't come within 4 tiles of the icon. Doc Ellis heals; the
+  other NPCs talk about their trade, but there's no money, inventory or
+  radiation to trade in yet. Edit `shared/base.json` to change the layout (one character per tile,
   see its `legend`), rooms, NPCs or their lines; restart the server to apply.
 - **Radioactive zombies** spawn out in the wasteland, 12–18 tiles from a player
   (just off screen), more readily in hot zones. They shamble one tile every

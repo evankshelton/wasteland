@@ -5,6 +5,7 @@ extends Control
 ##   godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --autoconnect
 
 const GAME_SCENE := "res://scenes/game.tscn"
+const CREATION_SCENE := "res://scenes/character_creation.tscn"
 const DEFAULT_PORT := 7777
 
 var _name_re := RegEx.create_from_string("^[A-Za-z0-9 _-]{2,16}$")
@@ -70,7 +71,8 @@ func _on_connect_pressed() -> void:
 
 
 func _on_joined(_welcome: Dictionary) -> void:
-	get_tree().change_scene_to_file(GAME_SCENE)
+	# A character that hasn't been accepted yet goes to the rolling screen first.
+	get_tree().change_scene_to_file(GAME_SCENE if Net.character.get("created", false) else CREATION_SCENE)
 
 
 func _on_disconnected(reason: String) -> void:

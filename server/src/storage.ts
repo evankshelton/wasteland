@@ -2,6 +2,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import type { Character } from "./character.ts";
 
 export type Location = "overworld" | "base";
 
@@ -16,11 +17,13 @@ export interface PlayerRecord {
   /** Position inside the base map, while loc is "base". */
   bx: number;
   by: number;
+  /** Undefined until the server first rolls one (new players, and players from before characters existed). */
+  char?: Character;
 }
 
 export type SavedPosition = Pick<PlayerRecord, "id" | "x" | "y" | "loc" | "bx" | "by">;
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 export class Storage {
   private db: DatabaseSync;
@@ -32,6 +35,7 @@ export class Storage {
     playerByName: StatementSync;
     insertPlayer: StatementSync;
     savePlayer: StatementSync;
+    saveCharacter: StatementSync;
   };
 
   constructor(path: string) {
@@ -67,11 +71,14 @@ export class Storage {
       putChunk: this.db.prepare("INSERT OR REPLACE INTO chunks (cx, cy, tiles, generated_at) VALUES (?, ?, ?, ?)"),
       countChunks: this.db.prepare("SELECT COUNT(*) AS n FROM chunks"),
       chunkCoords: this.db.prepare("SELECT cx, cy FROM chunks"),
-      playerByName: this.db.prepare(`SELECT id, name, token, x, y, location AS loc, base_x AS bx, base_y AS "by" FROM players WHERE name = ?`),
+      playerByName: this.db.prepare(
+        `SELECT id, name, token, x, y, location AS loc, base_x AS bx, base_y AS "by", character FROM players WHERE name = ?`,
+      ),
       insertPlayer: this.db.prepare(
         "INSERT INTO players (name, token, x, y, location, base_x, base_y, created_at, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ),
       savePlayer: this.db.prepare("UPDATE players SET x = ?, y = ?, location = ?, base_x = ?, base_y = ?, last_seen = ? WHERE id = ?"),
+      saveCharacter: this.db.prepare("UPDATE players SET character = ? WHERE id = ?"),
     };
   }
 
@@ -83,6 +90,11 @@ export class Storage {
       if (!cols.has("location")) this.db.exec("ALTER TABLE players ADD COLUMN location TEXT NOT NULL DEFAULT 'overworld'");
       if (!cols.has("base_x")) this.db.exec("ALTER TABLE players ADD COLUMN base_x INTEGER NOT NULL DEFAULT 0");
       if (!cols.has("base_y")) this.db.exec("ALTER TABLE players ADD COLUMN base_y INTEGER NOT NULL DEFAULT 0");
+    }
+    if (version < 3) {
+      // The character (abilities, level, XP, health) as JSON; NULL until first rolled.
+      const cols = new Set((this.db.prepare("PRAGMA table_info(players)").all() as { name: string }[]).map((c) => c.name));
+      if (!cols.has("character")) this.db.exec("ALTER TABLE players ADD COLUMN character TEXT");
     }
     if (version < SCHEMA_VERSION) this.setMeta("schema_version", String(SCHEMA_VERSION));
   }
@@ -115,7 +127,14 @@ export class Storage {
   }
 
   findPlayer(name: string): PlayerRecord | undefined {
-    return this.q.playerByName.get(name) as PlayerRecord | undefined;
+    const row = this.q.playerByName.get(name) as (Omit<PlayerRecord, "char"> & { character: string | null }) | undefined;
+    if (!row) return undefined;
+    const { character, ...rec } = row;
+    return { ...rec, char: character ? (JSON.parse(character) as Character) : undefined };
+  }
+
+  saveCharacter(id: number, char: Character): void {
+    this.q.saveCharacter.run(JSON.stringify(char), id);
   }
 
   createPlayer(name: string, token: string, start: Omit<SavedPosition, "id">): PlayerRecord {

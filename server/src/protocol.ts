@@ -1,7 +1,9 @@
 // Wire protocol: one JSON object per WebSocket text message, discriminated by `t`.
 // Keep in sync with client/scripts/net.gd and docs/PROTOCOL.md.
 
-export const PROTOCOL_VERSION = 5;
+import { ABILITIES, type Ability, type Character } from "./character.ts";
+
+export const PROTOCOL_VERSION = 6;
 
 /** Most chunk coordinates a client may ask for in one map_chunks request. */
 export const MAP_BATCH_MAX = 256;
@@ -21,14 +23,19 @@ export type ClientMsg =
   | { t: "move"; dir: Dir; seq: number }
   | { t: "map" }
   | { t: "map_chunks"; coords: [number, number][] }
-  | { t: "encounter_end"; id: number; result: EncounterResult; killed: number[]; dir?: Dir }
-  | { t: "enter" }; // go into the base while standing on its icon
+  | { t: "encounter_end"; id: number; result: EncounterResult; killed: number[]; dir?: Dir; hp?: number }
+  | { t: "enter" } // go into the base while standing on its icon
+  | { t: "reroll" } // roll new abilities (only before accepting a character)
+  | { t: "accept" } // keep the current roll and start playing
+  | { t: "raise"; ability: Ability } // spend a level-up point
+  | { t: "service"; npc: number }; // ask an NPC in the base for their service (talking to them does this)
 
 export type EncounterResult = "victory" | "fled" | "died";
 const RESULTS: readonly string[] = ["victory", "fled", "died"];
 
 // ---- server -> client ----
 export type ServerMsg =
+  | { t: "character"; character: Character }
   | {
       t: "welcome";
       id: number;
@@ -39,6 +46,8 @@ export type ServerMsg =
       chunkSize: number;
       tiles: { id: number; key: string; name: string; passable: boolean; color: string }[];
       motd: string;
+      /** If not yet created, the client shows the rolling screen; nothing else is sent until "accept". */
+      character: Character;
     }
   | { t: "chunk"; cx: number; cy: number; tiles: string } // base64, row-major bytes
   | { t: "you"; x: number; y: number; seq: number; ok: boolean }
@@ -116,8 +125,21 @@ export function parseClientMsg(raw: string): ClientMsg | undefined {
       if (typeof o.id !== "number" || typeof o.result !== "string" || !RESULTS.includes(o.result)) return undefined;
       if (!Array.isArray(o.killed) || o.killed.length > 256 || !o.killed.every(Number.isSafeInteger)) return undefined;
       if (o.dir !== undefined && (typeof o.dir !== "string" || !(o.dir in DIR_DELTA))) return undefined;
-      return { t: "encounter_end", id: o.id, result: o.result as EncounterResult, killed: o.killed as number[], dir: o.dir as Dir | undefined };
+      if (o.hp !== undefined && (typeof o.hp !== "number" || !Number.isFinite(o.hp))) return undefined;
+      return {
+        t: "encounter_end", id: o.id, result: o.result as EncounterResult, killed: o.killed as number[],
+        dir: o.dir as Dir | undefined, hp: o.hp as number | undefined,
+      };
     }
+    case "reroll":
+    case "accept":
+      return { t: o.t };
+    case "raise":
+      if (typeof o.ability !== "string" || !ABILITIES.includes(o.ability as Ability)) return undefined;
+      return { t: "raise", ability: o.ability as Ability };
+    case "service":
+      if (typeof o.npc !== "number") return undefined;
+      return { t: "service", npc: o.npc };
     default:
       return undefined;
   }

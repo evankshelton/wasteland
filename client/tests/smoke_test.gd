@@ -20,6 +20,7 @@ extends Node
 ## the base to "_base").
 
 const GAME_SCENE := preload("res://scenes/game.tscn")
+const CREATION_SCENE := preload("res://scenes/character_creation.tscn")
 
 var host := "127.0.0.1"
 var port := 7777
@@ -55,9 +56,12 @@ func _run() -> void:
 	var start: Vector2i = game.pos
 	print("joined at %s" % start)
 
-	# Walk out of the base's south gate, then a little east.
+	# Walk out of the base's south gate, then a little east (or any way that's open).
 	await _hold(game, &"move_down", 1.6)
 	await _hold(game, &"move_right", 0.6)
+	for action: StringName in [&"move_up", &"move_left"]:
+		if game.pos == start:
+			await _hold(game, action, 1.0)
 	await get_tree().create_timer(0.5).timeout
 	var stopped: Vector2i = game.pos
 	print("walked to %s, %d chunks loaded" % [stopped, game.chunks.size()])
@@ -210,13 +214,33 @@ func _test_encounters(game: Node) -> String:
 	print("shot zombie #%d: health %d" % [z.monster_id, z.health])
 
 	# 3. Finish them all: victory.
+	var xp_before := int(Net.character.xp)
 	for e: Zombie3D in enc.enemies.values():
 		e.hit(1000.0)
 	if not await _wait_for_result(game, "victory"):
 		return "victory was not confirmed by the server (got '%s')" % game.last_encounter_result
 	if not game.terrain.visible:
 		return "overworld not restored after the fight"
-	print("victory at %s" % game.pos)
+	await get_tree().process_frame
+	var earned := int(Net.character.xp) - xp_before
+	print("victory at %s: +%d XP, %s" % [game.pos, earned, game._vitals(Net.character)])
+	if earned < 35:
+		return "a victory with kills earned only %d XP" % earned
+	if int(Net.character.points) > 0:
+		# Levelled up: the panel offers the abilities; key 1 raises strength by 2.
+		await get_tree().process_frame
+		if not game.level_up.visible:
+			return "reached level %d but no level-up choice appeared" % Net.character.level
+		await _screenshot(screenshot.get_basename() + "_levelup." + screenshot.get_extension()) if not screenshot.is_empty() else null
+		var str_before := int(Net.character.str)
+		var key := InputEventKey.new()
+		key.physical_keycode = KEY_1
+		key.pressed = true
+		Input.parse_input_event(key)
+		await Net.character_changed
+		if int(Net.character.str) != str_before + 2:
+			return "pressing 1 on the level-up panel didn't raise strength"
+		print("level %d: raised strength %d -> %d" % [Net.character.level, str_before, Net.character.str])
 
 	# 4. Next fight: run for it, east.
 	enc = await _wait_for_encounter(game)
@@ -270,10 +294,49 @@ func _join() -> Node:
 	if result[0] == Net.disconnected:
 		_finish(false, "could not join: %s" % result[1])
 		return null
+	if not Net.character.created and not await _create_character():
+		return null
 	var game := GAME_SCENE.instantiate()
 	add_child(game)
 	await get_tree().create_timer(0.3).timeout
 	return game
+
+
+## A new character: reroll once (on the real rolling screen, when taking
+## screenshots), check both rolls are in range, then accept.
+func _create_character() -> bool:
+	var first := Net.character.duplicate()
+	var screen: Control = null
+	if not screenshot.is_empty() and DisplayServer.get_name() != "headless":
+		screen = CREATION_SCENE.instantiate()
+		add_child(screen)
+		await get_tree().process_frame
+		screen.reroll()
+	else:
+		Net.send({"t": "reroll"})
+	await Net.character_changed
+	var second := Net.character.duplicate()
+	for c: Dictionary in [first, second]:
+		for key in ["str", "dex", "int"]:
+			if int(c[key]) < 6 or int(c[key]) > 18:
+				_finish(false, "rolled %s %d, outside 6-18" % [key, c[key]])
+				return false
+		if int(c.maxHp) < 6 or int(c.maxHp) > 12:
+			_finish(false, "rolled hit points %d, outside 6-12" % c.maxHp)
+			return false
+	print("rolled STR %d DEX %d INT %d HP %d, rerolled to STR %d DEX %d INT %d HP %d" % [
+		first.str, first.dex, first.int, first.maxHp, second.str, second.dex, second.int, second.maxHp])
+	if screen:
+		await get_tree().create_timer(0.4).timeout
+		await _screenshot(screenshot.get_basename() + "_roll." + screenshot.get_extension())
+		screen.queue_free() # Before accepting: it would switch scenes.
+		await get_tree().process_frame
+	Net.send({"t": "accept"})
+	await Net.character_changed
+	if not Net.character.created:
+		_finish(false, "accepting didn't create the character")
+		return false
+	return true
 
 
 func _hold(game: Node, action: StringName, seconds: float) -> void:
