@@ -88,10 +88,11 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
 - **Encounters.** When a zombie and a player end up on the same tile (either
   one walks onto the other), the game switches to first person. Every zombie
   within 8 tiles joins the fight. The 3D arena is built from the real
-  overworld tiles around the encounter: 17×17 tiles, each a 4 m square
-  showing that tile's pixel art. Mountains, ruined buildings, base walls and
-  toxic water are solid; dead forests have trees; rubble and craters have
-  debris; hot zones glow and burn (4 HP/s); sludge marsh slows you down.
+  overworld tiles around the encounter: 17×17 tiles, each a 12 m square (about
+  200 m across) with the tile's pixel art repeated on the ground. Mountains,
+  ruined buildings, base walls and toxic water are solid; dead forests are
+  stands of trees; rubble and craters are strewn with debris; hot zones glow
+  and burn (4 HP/s); sludge marsh slows you down.
   Zombies start where they stood on the overworld. Kill them all, or run past
   the rusty posts at the arena's edge to flee: you come out up to 3 tiles that
   way on the overworld and the survivors go back to their tiles. Die and you

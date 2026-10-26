@@ -14,13 +14,16 @@ signal finished(result: String, killed: Array, dir: String)
 const TILES_TEXTURE := preload("res://assets/tiles.png")
 const TERRAIN_SHADER := preload("res://shaders/terrain.gdshader")
 
-const CELL := 4.0 ## metres per overworld tile
+const CELL := 12.0 ## metres per overworld tile
+const GROUND_QUAD := 2.0 ## metres per repeat of a tile's pixel art on the ground
+const BLOCK_TEXTURE_SIZE := 4.0 ## metres per repeat of a tile's pixel art on blocks
+const CLEAR_RADIUS := 3.0 ## metres kept free of trees and debris around where anyone starts
 const PLAYER_SPEED := 5.0
 const SWAMP_SPEED_FACTOR := 0.55
 const MOUSE_SENSITIVITY := 0.0025
 const FIRE_INTERVAL := 0.2
 const SHOT_DAMAGE := 34.0
-const SHOT_RANGE := 90.0
+const SHOT_RANGE := 250.0
 const MAX_HEALTH := 100.0
 const RADIATION_DPS := 4.0
 const GRAVITY := 20.0
@@ -48,6 +51,11 @@ var _materials := {}
 var _fire_cooldown := 0.0
 var _ended := false
 var _hurt := 0.0
+var _clearings: Array[Vector3] = [] ## where the player and zombies start
+## Repeated decoration (trees, debris, tufts, posts) is drawn as one MultiMesh per
+## kind: thousands of separate meshes would be thousands of draw calls.
+## kind -> {mesh, material, transforms: Array[Transform3D], colors: Array[Color]}
+var _batches := {}
 
 @onready var arena: Node3D = %Arena
 @onready var enemies_root: Node3D = %Enemies
@@ -81,19 +89,22 @@ func setup(game: Node, msg: Dictionary) -> void:
 			ids[Vector2i(dx, dy)] = id
 			_cells[Vector2i(dx, dy)] = _keys.get(id, "wasteland")
 
-	# Cells someone starts in stay clear of trees and debris.
-	var occupied := {Vector2i.ZERO: true}
+	# Where everyone starts; trees and debris keep clear of these spots.
+	_clearings.append(Vector3.ZERO)
 	var spawns := []
+	var jitter := CELL / 2.0 - 2.0
 	for e: Dictionary in msg.enemies:
 		var cell := Vector2i(int(e.dx), int(e.dy))
 		if cell == Vector2i.ZERO:
-			cell = _open_cell_near_player() # It caught us: give it a few metres.
-		occupied[cell] = true
-		spawns.append([int(e.id), cell])
+			cell = _open_cell_near_player() # It caught us: give it some room.
+		var at := _cell_center(cell) + Vector3(_rng.randf_range(-jitter, jitter), 0, _rng.randf_range(-jitter, jitter))
+		_clearings.append(at)
+		spawns.append([int(e.id), at])
 
 	_build_ground(ids)
-	_build_cells(occupied)
+	_build_cells()
 	_build_boundary()
+	_flush_batches()
 	_build_gun()
 
 	for s in spawns:
@@ -122,11 +133,22 @@ func _open_cell_near_player() -> Vector2i:
 	var options: Array[Vector2i] = []
 	for cell: Vector2i in _cells:
 		var d := maxi(absi(cell.x), absi(cell.y))
-		if d >= 1 and d <= 2 and _cells[cell] not in SOLID and _cells[cell] != "dead_forest":
+		if d == 1 and _cells[cell] not in SOLID:
 			options.append(cell)
 	if options.is_empty():
 		return Vector2i(0, -1)
 	return options[_rng.randi_range(0, options.size() - 1)]
+
+
+## A point in a cell, `margin` metres from its edges, away from anyone's starting spot.
+## Returns Vector3.INF if a few tries all land in a clearing.
+func _scatter(c: Vector3, margin: float) -> Vector3:
+	var reach := CELL / 2.0 - margin
+	for attempt in 4:
+		var p := c + Vector3(_rng.randf_range(-reach, reach), 0, _rng.randf_range(-reach, reach))
+		if _clearings.all(func(q: Vector3) -> bool: return p.distance_to(q) > CLEAR_RADIUS):
+			return p
+	return Vector3.INF
 
 
 func _build_ground(ids: Dictionary) -> void:
@@ -134,6 +156,7 @@ func _build_ground(ids: Dictionary) -> void:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var half := CELL / 2.0
+	var quads := int(CELL / GROUND_QUAD)
 	for cell: Vector2i in ids:
 		var id: int = ids[cell]
 		var color: Color = _colors.get(id, Color(0.3, 0.2, 0.1))
@@ -141,16 +164,16 @@ func _build_ground(ids: Dictionary) -> void:
 		var u0 := id / count
 		var u1 := (id + 1) / count
 		var c := _cell_center(cell)
-		# 2x2 quads per cell so the pixel art reads at a human scale.
-		for qy in 2:
-			for qx in 2:
-				var x0 := c.x - half + qx * half
-				var z0 := c.z - half + qy * half
+		# The tile's pixel art repeats every GROUND_QUAD metres so it reads at a human scale.
+		for qy in quads:
+			for qx in quads:
+				var x0 := c.x - half + qx * GROUND_QUAD
+				var z0 := c.z - half + qy * GROUND_QUAD
 				var corners := [
 					[Vector3(x0, 0, z0), Vector2(u0, 0)],
-					[Vector3(x0 + half, 0, z0), Vector2(u1, 0)],
-					[Vector3(x0 + half, 0, z0 + half), Vector2(u1, 1)],
-					[Vector3(x0, 0, z0 + half), Vector2(u0, 1)],
+					[Vector3(x0 + GROUND_QUAD, 0, z0), Vector2(u1, 0)],
+					[Vector3(x0 + GROUND_QUAD, 0, z0 + GROUND_QUAD), Vector2(u1, 1)],
+					[Vector3(x0, 0, z0 + GROUND_QUAD), Vector2(u0, 1)],
 				]
 				for i in [0, 1, 2, 0, 2, 3]:
 					st.set_color(color)
@@ -168,7 +191,7 @@ func _build_ground(ids: Dictionary) -> void:
 	# Scorched earth beyond the arena, and one floor collider under everything.
 	var outside := MeshInstance3D.new()
 	var plane := PlaneMesh.new()
-	plane.size = Vector2(600, 600)
+	plane.size = Vector2(2000, 2000)
 	outside.mesh = plane
 	outside.position.y = -0.02
 	outside.material_override = _plain(Color(0.16, 0.11, 0.07))
@@ -181,7 +204,7 @@ func _build_ground(ids: Dictionary) -> void:
 	arena.add_child(floor_body)
 
 
-func _build_cells(occupied: Dictionary) -> void:
+func _build_cells() -> void:
 	var solids := StaticBody3D.new()
 	solids.collision_layer = LAYER_WORLD
 	arena.add_child(solids)
@@ -193,40 +216,54 @@ func _build_cells(occupied: Dictionary) -> void:
 			_add_collider(solids, c + Vector3(0, 2.5, 0), Vector3(CELL, 5, CELL))
 		match key:
 			"mountains":
-				var h := _rng.randf_range(7.0, 12.0)
+				var h := _rng.randf_range(16.0, 28.0)
 				_add_box(c + Vector3(0, h / 2, 0), Vector3(CELL, h, CELL), _tile_material("mountains", Color(0.5, 0.48, 0.46)))
 				var cap := h * 0.25
-				_add_box(c + Vector3(_rng.randf_range(-0.6, 0.6), h + cap / 2, _rng.randf_range(-0.6, 0.6)), Vector3(2.2, cap, 2.2), _plain(Color(0.9, 0.9, 0.92)))
+				var drift := CELL * 0.15
+				_add_box(c + Vector3(_rng.randf_range(-drift, drift), h + cap / 2, _rng.randf_range(-drift, drift)), Vector3(CELL * 0.55, cap, CELL * 0.55), _plain(Color(0.9, 0.9, 0.92)))
 			"ruins":
-				var h := _rng.randf_range(5.0, 9.0)
+				var h := _rng.randf_range(9.0, 18.0)
 				_add_box(c + Vector3(0, h / 2, 0), Vector3(CELL * 0.92, h, CELL * 0.92), _tile_material("ruins", Color(0.6, 0.6, 0.6)))
-				var stub := _rng.randf_range(1.0, 2.5) # Jagged, half-collapsed top.
-				_add_box(c + Vector3(_rng.randf_range(-0.8, 0.8), h + stub / 2, _rng.randf_range(-0.8, 0.8)), Vector3(1.6, stub, 1.6), _tile_material("ruins", Color(0.6, 0.6, 0.6)))
+				for i in _rng.randi_range(1, 3): # Jagged, half-collapsed top.
+					var stub := _rng.randf_range(1.5, 5.0)
+					var reach := CELL * 0.3
+					_add_box(c + Vector3(_rng.randf_range(-reach, reach), h + stub / 2, _rng.randf_range(-reach, reach)), Vector3(CELL * 0.3, stub, CELL * 0.3), _tile_material("ruins", Color(0.6, 0.6, 0.6)))
 			"base_wall":
 				_add_box(c + Vector3(0, 2.5, 0), Vector3(CELL, 5, CELL), _tile_material("base_wall", Color.WHITE))
+			"base_icon":
+				# The base itself, seen from outside: a concrete bunker.
+				_add_box(c + Vector3(0, 3, 0), Vector3(CELL * 0.7, 6, CELL * 0.7), _tile_material("base_wall", Color.WHITE))
+				_add_collider(solids, c + Vector3(0, 3, 0), Vector3(CELL * 0.7, 6, CELL * 0.7))
 			"water":
 				var water := _plain(Color(0.1, 0.35, 0.3, 0.75), Color(0.1, 0.6, 0.3), 0.4)
 				water.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 				_add_box(c + Vector3(0, 0.03, 0), Vector3(CELL, 0.06, CELL), water)
 			"dead_forest":
-				if not occupied.has(cell):
-					for i in _rng.randi_range(1, 2):
-						_add_tree(solids, c + Vector3(_rng.randf_range(-1.3, 1.3), 0, _rng.randf_range(-1.3, 1.3)))
+				for i in _rng.randi_range(5, 9):
+					var at := _scatter(c, 0.6)
+					if at.is_finite():
+						_add_tree(solids, at)
 			"rubble", "crater":
-				if not occupied.has(cell):
-					for i in _rng.randi_range(2, 5):
-						var s := _rng.randf_range(0.25, 0.8)
-						var debris := _add_box(c + Vector3(_rng.randf_range(-1.6, 1.6), s * 0.3, _rng.randf_range(-1.6, 1.6)), Vector3(s, s * 0.7, s * 1.3), _plain(Color(0.42, 0.4, 0.38).darkened(_rng.randf() * 0.4)))
-						debris.rotation = Vector3(_rng.randf() * 0.5, _rng.randf() * TAU, _rng.randf() * 0.5)
+				for i in _rng.randi_range(8, 14):
+					var at := _scatter(c, 0.4)
+					if not at.is_finite():
+						continue
+					var s := _rng.randf_range(0.25, 0.9)
+					var turn := Basis.from_euler(Vector3(_rng.randf() * 0.5, _rng.randf() * TAU, _rng.randf() * 0.5))
+					_instance(&"debris", Transform3D(turn * Basis.from_scale(Vector3(s, s * 0.7, s * 1.3)), at + Vector3(0, s * 0.3, 0)),
+						Color(0.42, 0.4, 0.38).darkened(_rng.randf() * 0.4))
 			"scrub":
-				for i in _rng.randi_range(2, 4):
-					var tuft := _add_box(c + Vector3(_rng.randf_range(-1.7, 1.7), 0.2, _rng.randf_range(-1.7, 1.7)), Vector3(0.06, 0.4, 0.06), _plain(Color(0.42, 0.4, 0.17)))
-					tuft.rotation = Vector3(_rng.randf_range(-0.4, 0.4), 0, _rng.randf_range(-0.4, 0.4))
+				for i in _rng.randi_range(10, 16):
+					var at := _scatter(c, 0.2)
+					if not at.is_finite():
+						continue
+					var lean := Basis.from_euler(Vector3(_rng.randf_range(-0.4, 0.4), 0, _rng.randf_range(-0.4, 0.4)))
+					_instance(&"tuft", Transform3D(lean, at + Vector3(0, 0.2, 0)))
 			"hills", "dunes":
 				var mound := MeshInstance3D.new()
 				var sphere := SphereMesh.new()
 				sphere.radius = CELL * 0.55
-				sphere.height = 0.7
+				sphere.height = 1.2
 				mound.mesh = sphere
 				mound.position = c
 				mound.material_override = _plain(_colors_for(key).darkened(0.2))
@@ -238,20 +275,20 @@ func _build_cells(occupied: Dictionary) -> void:
 	for cell in glow_cells.slice(0, MAX_GLOW_LIGHTS):
 		var light := OmniLight3D.new()
 		light.light_color = Color(0.3, 1.0, 0.3)
-		light.light_energy = 1.5
-		light.omni_range = 6.0
-		light.position = _cell_center(cell) + Vector3(0, 1.0, 0)
+		light.light_energy = 2.0
+		light.omni_range = CELL * 0.9
+		light.position = _cell_center(cell) + Vector3(0, 2.0, 0)
 		arena.add_child(light)
 
 
 func _build_boundary() -> void:
 	# Rusty posts mark the edge; crossing it means fleeing.
-	var post_mat := _plain(Color(0.5, 0.2, 0.08), Color(0.6, 0.15, 0.0), 0.3)
-	var steps := radius * 2 + 2
+	var spacing := 4.0
+	var steps := int(2.0 * half_extent / spacing) + 1
 	for i in steps:
-		var t := -half_extent + i * CELL
+		var t := -half_extent + i * spacing
 		for p in [Vector3(t, 0, -half_extent), Vector3(t, 0, half_extent), Vector3(-half_extent, 0, t), Vector3(half_extent, 0, t)]:
-			_add_box(p + Vector3(0, 0.9, 0), Vector3(0.18, 1.8, 0.18), post_mat)
+			_instance(&"post", Transform3D(Basis.IDENTITY, p + Vector3(0, 0.9, 0)))
 
 
 func _build_gun() -> void:
@@ -274,22 +311,69 @@ func _build_gun() -> void:
 
 
 func _add_tree(body: StaticBody3D, base: Vector3) -> void:
-	var bark := _plain(Color(0.3, 0.2, 0.12))
 	var h := _rng.randf_range(3.5, 5.5)
-	var trunk := MeshInstance3D.new()
-	var cyl := CylinderMesh.new()
-	cyl.top_radius = 0.07
-	cyl.bottom_radius = 0.2
-	cyl.height = h
-	trunk.mesh = cyl
-	trunk.position = base + Vector3(0, h / 2, 0)
-	trunk.material_override = bark
-	arena.add_child(trunk)
+	_instance(&"trunk", Transform3D(Basis.from_scale(Vector3(1, h, 1)), base + Vector3(0, h / 2, 0)))
 	for i in _rng.randi_range(2, 4):
-		var branch := _add_box(base + Vector3(0, h * _rng.randf_range(0.5, 0.9), 0), Vector3(0.06, 0.06, _rng.randf_range(0.8, 1.6)), bark)
-		branch.rotation = Vector3(_rng.randf_range(-0.9, -0.3), _rng.randf() * TAU, 0)
-		branch.translate_object_local(Vector3(0, 0, 0.4))
+		var turn := Basis.from_euler(Vector3(_rng.randf_range(-0.9, -0.3), _rng.randf() * TAU, 0))
+		var length := _rng.randf_range(0.8, 1.6)
+		var start := base + Vector3(0, h * _rng.randf_range(0.5, 0.9), 0)
+		_instance(&"branch", Transform3D(turn * Basis.from_scale(Vector3(1, 1, length)), start + turn * Vector3(0, 0, 0.4)))
 	_add_collider(body, base + Vector3(0, h / 2, 0), Vector3(0.45, h, 0.45))
+
+
+## Queue one copy of a kind of decoration; _flush_batches draws each kind in one go.
+func _instance(kind: StringName, xform: Transform3D, color := Color.WHITE) -> void:
+	if not _batches.has(kind):
+		var mesh: Mesh
+		var material: StandardMaterial3D
+		match kind:
+			&"trunk":
+				var cyl := CylinderMesh.new()
+				cyl.top_radius = 0.07
+				cyl.bottom_radius = 0.2
+				cyl.height = 1.0 # Stretched to each tree's height.
+				mesh = cyl
+				material = _plain(Color(0.3, 0.2, 0.12))
+			&"branch":
+				mesh = _unit_box(Vector3(0.06, 0.06, 1.0)) # Stretched to each branch's length.
+				material = _plain(Color(0.3, 0.2, 0.12))
+			&"debris":
+				mesh = _unit_box(Vector3.ONE)
+				material = _plain(Color.WHITE).duplicate()
+				material.vertex_color_use_as_albedo = true # Each chunk gets its own shade.
+			&"tuft":
+				mesh = _unit_box(Vector3(0.06, 0.4, 0.06))
+				material = _plain(Color(0.42, 0.4, 0.17))
+			&"post":
+				mesh = _unit_box(Vector3(0.18, 1.8, 0.18))
+				material = _plain(Color(0.5, 0.2, 0.08), Color(0.6, 0.15, 0.0), 0.3)
+		_batches[kind] = {"mesh": mesh, "material": material, "transforms": [], "colors": []}
+	_batches[kind].transforms.append(xform)
+	_batches[kind].colors.append(color)
+
+
+func _flush_batches() -> void:
+	for kind: StringName in _batches:
+		var batch: Dictionary = _batches[kind]
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.use_colors = true
+		mm.mesh = batch.mesh
+		mm.instance_count = batch.transforms.size()
+		for i in mm.instance_count:
+			mm.set_instance_transform(i, batch.transforms[i])
+			mm.set_instance_color(i, batch.colors[i])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = batch.material
+		arena.add_child(mmi)
+	_batches.clear()
+
+
+func _unit_box(size: Vector3) -> BoxMesh:
+	var box := BoxMesh.new()
+	box.size = size
+	return box
 
 
 func _add_box(pos: Vector3, size: Vector3, material: Material) -> MeshInstance3D:
@@ -327,7 +411,7 @@ func _plain(color: Color, emission := Color.BLACK, glow := 0.0) -> StandardMater
 	return m
 
 
-## A material that wraps the overworld tile's pixel art round a block, one tile per CELL.
+## A material that wraps the overworld tile's pixel art round a block, repeating every BLOCK_TEXTURE_SIZE metres.
 func _tile_material(key: String, tint: Color) -> StandardMaterial3D:
 	if _materials.has(key):
 		return _materials[key]
@@ -339,7 +423,7 @@ func _tile_material(key: String, tint: Color) -> StandardMaterial3D:
 	m.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
 	m.uv1_triplanar = true
 	m.uv1_world_triplanar = true
-	m.uv1_scale = Vector3.ONE / CELL
+	m.uv1_scale = Vector3.ONE / BLOCK_TEXTURE_SIZE
 	m.roughness = 0.95
 	_materials[key] = m
 	return m
@@ -349,13 +433,13 @@ func _colors_for(key: String) -> Color:
 	return _colors.get(_keys.find_key(key), Color(0.4, 0.3, 0.2))
 
 
-func _spawn_zombie(id: int, cell: Vector2i) -> void:
+func _spawn_zombie(id: int, at: Vector3) -> void:
 	var z := Zombie3D.new()
 	z.monster_id = id
 	z.target = player
 	# Position before entering the tree: a body that appears at the origin for
 	# even one physics step overlaps the player there and launches them.
-	z.position = _cell_center(cell) + Vector3(_rng.randf_range(-1, 1), 0, _rng.randf_range(-1, 1))
+	z.position = at
 	enemies_root.add_child(z)
 	z.died.connect(_on_zombie_died)
 	z.attacked.connect(_on_player_hit)

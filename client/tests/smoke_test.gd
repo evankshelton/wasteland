@@ -186,6 +186,11 @@ func _test_encounters(game: Node) -> String:
 	if game.terrain.visible:
 		return "overworld still showing during the fight"
 	await get_tree().create_timer(1.0).timeout
+	if DisplayServer.get_name() != "headless":
+		await get_tree().create_timer(2.0).timeout
+		print("rendering the fight: %d fps, %d draw calls, process %.1f ms, physics %.1f ms" % [
+			Engine.get_frames_per_second(), Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+			Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0])
 	if not screenshot.is_empty():
 		await _screenshot(screenshot.get_basename() + "_fps." + screenshot.get_extension())
 		enc.player.rotate_y(PI) # ...and the view behind.

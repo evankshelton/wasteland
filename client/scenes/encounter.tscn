@@ -22,7 +22,7 @@ tonemap_mode = 2
 glow_enabled = true
 fog_enabled = true
 fog_light_color = Color(0.42, 0.28, 0.17, 1)
-fog_density = 0.014
+fog_density = 0.007
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
 radius = 0.35
