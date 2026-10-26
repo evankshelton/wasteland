@@ -4,6 +4,9 @@ extends Node
 ##
 ##   godot --path client res://tests/arena_preview.tscn -- --terrain dead_forest --screenshot out.png
 ##
+## --terrain mixed lays out patches of several terrains, to see how they blend.
+## --near-edge stands 20 m inside the arena's edge, looking out through it.
+##
 ## Prints fps and draw calls after a few seconds, saves a screenshot if asked,
 ## then quits. --check-trees also shoots the nearest tree and walks into it,
 ## failing (exit code 1) if either goes through. Tile definitions are read
@@ -14,12 +17,17 @@ const ENCOUNTER_SCENE := preload("res://scenes/encounter.tscn")
 var terrain_key := "dead_forest"
 var screenshot := ""
 var check_trees := false
+var near_edge := false
 var _tile_id := 1
+var _ids_by_key := {}
+var _patches := FastNoiseLite.new()
+const MIXED := ["wasteland", "scrub", "dead_forest", "hills", "water", "swamp", "rubble", "dunes", "radiation", "scrub"]
 
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	check_trees = "--check-trees" in args
+	near_edge = "--near-edge" in args
 	for i in args.size() - 1:
 		match args[i]:
 			"--terrain": terrain_key = args[i + 1]
@@ -28,14 +36,23 @@ func _ready() -> void:
 	var defs: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(tiles_path))
 	Net.welcome = {"tiles": defs.tiles}
 	for t: Dictionary in defs.tiles:
+		_ids_by_key[t.key] = int(t.id)
 		if t.key == terrain_key:
 			_tile_id = int(t.id)
+	_patches.noise_type = FastNoiseLite.TYPE_CELLULAR
+	_patches.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
+	_patches.frequency = 0.28
 	_run.call_deferred()
 
 
 ## Stands in for game.gd: every tile is the chosen terrain, except the player's.
 func tile_at(p: Vector2i) -> int:
-	return 1 if p == Vector2i.ZERO else _tile_id
+	if p == Vector2i.ZERO:
+		return 1
+	if terrain_key == "mixed":
+		var v := (_patches.get_noise_2d(p.x, p.y) + 1.0) / 2.0
+		return _ids_by_key[MIXED[clampi(int(v * MIXED.size()), 0, MIXED.size() - 1)]]
+	return _tile_id
 
 
 func _run() -> void:
@@ -46,6 +63,11 @@ func _run() -> void:
 		{"id": 2, "kind": "zombie", "dx": 2, "dy": -3},
 	]})
 	enc.player.rotation.y = 0.0 # Look north, towards the zombies.
+	if near_edge:
+		var z: float = -(enc.half_extent - 20.0)
+		enc.player.global_position = Vector3(0, enc.height_at(0, z) + 0.05, z)
+		for zombie: Zombie3D in enc.enemies.values():
+			zombie.target = null
 	await get_tree().create_timer(3.0).timeout
 	print("%s arena: %d fps, %d draw calls, %d objects in frame" % [
 		terrain_key, Engine.get_frames_per_second(),
@@ -76,6 +98,7 @@ func _check_trees(enc: Node3D) -> bool:
 	# Stand 12 m from the trunk, on the side towards the arena centre, facing it.
 	var away := (Vector3.ZERO - tree).normalized() if tree.length() > 0.1 else Vector3.BACK
 	var start := tree + away * 12.0
+	start.y = enc.height_at(start.x, start.z) + 0.05
 	enc.player.global_position = start
 	enc.player.rotation.y = atan2(away.x, away.z) # Facing -away, towards the tree.
 	enc.camera.rotation.x = 0.0

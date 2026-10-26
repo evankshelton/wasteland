@@ -247,7 +247,7 @@ func _test_encounters(game: Node) -> String:
 	if enc == null:
 		return "no second encounter"
 	center = game.pos
-	enc.player.global_position = Vector3(enc.half_extent + 1.0, 1.0, 0.0)
+	enc.player.global_position = Vector3(enc.half_extent + 1.0, enc.height_at(enc.half_extent + 1.0, 0.0) + 0.5, 0.0)
 	if not await _wait_for_result(game, "fled"):
 		return "fleeing was not confirmed by the server (got '%s')" % game.last_encounter_result
 	print("fled from %s to %s" % [center, game.pos])

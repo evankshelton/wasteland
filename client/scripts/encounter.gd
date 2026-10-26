@@ -1,9 +1,12 @@
 extends Node3D
 ## First-person fight, started when a zombie and the player share an overworld
 ## tile. The arena is the patch of overworld around the encounter, (2r+1)^2
-## tiles with each tile a CELL x CELL metre square, built from that tile's
+## tiles with each tile a CELL x CELL metre area, built from that tile's
 ## terrain: mountains, ruins, walls and water block, dead forests have trees,
-## hot zones glow and burn, sludge slows you down. Zombies start where they
+## hot zones glow and burn, sludge slows you down. The ground rolls gently
+## (hills rise, water and marsh sit in hollows) and neighbouring terrain types
+## blend into each other along meandering borders rather than meeting in
+## squares (see shaders/terrain.gdshader). Zombies start where they
 ## stood on the overworld relative to the player.
 ##
 ## Kill every zombie, or cross the edge of the arena to flee; `finished` then
@@ -13,9 +16,21 @@ signal finished(result: String, killed: Array, dir: String)
 
 const TILES_TEXTURE := preload("res://assets/tiles.png")
 const TERRAIN_SHADER := preload("res://shaders/terrain.gdshader")
+const WATER_SHADER := preload("res://shaders/water.gdshader")
+const BOUNDARY_SHADER := preload("res://shaders/boundary.gdshader")
 
 const CELL := 12.0 ## metres per overworld tile
 const GROUND_QUAD := 2.0 ## metres per repeat of a tile's pixel art on the ground
+const GROUND_MARGIN := 48.0 ## metres of terrain beyond the arena's edge, towards the horizon
+const MESH_STEP := 2.0 ## metres between ground mesh vertices (the collider uses 1 m)
+const SINK := 3.0 ## metres blocks extend below the ground so they never float on a slope
+## Per terrain type: [height offset in metres, roughness multiplier].
+const RELIEF := {
+	"hills": [2.5, 1.7], "mountains": [3.0, 1.3], "dunes": [0.6, 1.2], "scrub": [0.2, 1.0],
+	"dead_forest": [0.4, 1.1], "water": [-1.8, 0.3], "swamp": [-0.6, 0.4], "crater": [-1.0, 1.4],
+	"road": [0.0, 0.25], "ruins": [0.0, 0.35], "rubble": [0.0, 0.7], "base_icon": [0.0, 0.2],
+	"base_wall": [0.0, 0.2], "base_floor": [0.0, 0.2], "base_gate": [0.0, 0.2], "concrete": [0.0, 0.2],
+}
 const BLOCK_TEXTURE_SIZE := 4.0 ## metres per repeat of a tile's pixel art on blocks
 const CLEAR_RADIUS := 3.0 ## metres kept free of trees and debris around where anyone starts
 ## Tree models (any .glb here, git-ignored like the zombie) replace the stick
@@ -46,7 +61,7 @@ const LAYER_ENEMIES := 4
 const SOLID := ["mountains", "ruins", "base_wall", "water"]
 
 var radius := 8
-var half_extent := 34.0
+var half_extent := 34.0 ## radius of the ring at the arena's edge; crossing it means fleeing
 var max_health := 10.0
 var health := 10.0
 var shot_damage := 42.0
@@ -64,11 +79,18 @@ var _fire_cooldown := 0.0
 var _ended := false
 var _hurt := 0.0
 var _clearings: Array[Vector3] = [] ## where the player and zombies start
-## Repeated decoration (trees, debris, tufts, posts) is drawn as one MultiMesh per
+## Repeated decoration (trees, debris, tufts) is drawn as one MultiMesh per
 ## kind: thousands of separate meshes would be thousands of draw calls.
 ## kind -> {mesh, material, transforms: Array[Transform3D], colors: Array[Color]}
 var _batches := {}
 var _trees: Array[Vector3] = [] ## trunk positions placed so far
+var _ids := {} ## Vector2i cell -> tile id
+var _relief := {} ## Vector2i cell -> [offset, roughness]
+var _hills := FastNoiseLite.new()
+var _bumps := FastNoiseLite.new()
+
+var _cells_texture: ImageTexture
+static var _breakup: ImageTexture
 
 ## Loaded once: [{mesh, transform (model space -> tree root), height, footprint,
 ## colliders: [ConcavePolygonShape3D per size]}] per tree model.
@@ -105,14 +127,20 @@ func setup(game: Node, msg: Dictionary) -> void:
 		_keys[int(t.id)] = str(t.key)
 		_colors[int(t.id)] = Color.html(str(t.color))
 	var center := Vector2i(int(msg.x), int(msg.y))
-	var ids := {}
 	for dy in range(-radius, radius + 1):
 		for dx in range(-radius, radius + 1):
 			var id: int = game.tile_at(center + Vector2i(dx, dy))
 			if id < 0:
 				id = 1 # Not streamed to us yet: call it wasteland.
-			ids[Vector2i(dx, dy)] = id
+			_ids[Vector2i(dx, dy)] = id
 			_cells[Vector2i(dx, dy)] = _keys.get(id, "wasteland")
+			_relief[Vector2i(dx, dy)] = RELIEF.get(_cells[Vector2i(dx, dy)], [0.0, 1.0])
+	_hills.seed = int(msg.seed)
+	_hills.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	_hills.frequency = 1.0 / 70.0
+	_hills.fractal_octaves = 3
+	_bumps.seed = int(msg.seed) + 1
+	_bumps.frequency = 1.0 / 9.0
 
 	# Where everyone starts; trees and debris keep clear of these spots.
 	_clearings.append(Vector3.ZERO)
@@ -123,10 +151,15 @@ func setup(game: Node, msg: Dictionary) -> void:
 		if cell == Vector2i.ZERO:
 			cell = _open_cell_near_player() # It caught us: give it some room.
 		var at := _cell_center(cell) + Vector3(_rng.randf_range(-jitter, jitter), 0, _rng.randf_range(-jitter, jitter))
+		var inside := half_extent - 6.0 # Corner cells reach past the ring: start those zombies just inside it.
+		if Vector2(at.x, at.z).length() > inside:
+			var flat := Vector2(at.x, at.z).normalized() * inside
+			at = Vector3(flat.x, 0, flat.y)
+		at.y = height_at(at.x, at.z)
 		_clearings.append(at)
 		spawns.append([int(e.id), at])
 
-	_build_ground(ids)
+	_build_ground()
 	_build_cells()
 	_build_boundary()
 	_flush_batches()
@@ -134,6 +167,7 @@ func setup(game: Node, msg: Dictionary) -> void:
 
 	for s in spawns:
 		_spawn_zombie(s[0], s[1])
+	player.global_position = Vector3(0, height_at(0, 0) + 0.05, 0)
 	_face_nearest_enemy()
 	_update_hud()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -165,68 +199,159 @@ func _open_cell_near_player() -> Vector2i:
 	return options[_rng.randi_range(0, options.size() - 1)]
 
 
-## A point in a cell, `margin` metres from its edges, away from anyone's starting spot.
-## Returns Vector3.INF if a few tries all land in a clearing.
+## A point on the ground in a cell, `margin` metres from its edges, away from
+## anyone's starting spot. Returns Vector3.INF if a few tries all land in a clearing.
 func _scatter(c: Vector3, margin: float) -> Vector3:
 	var reach := CELL / 2.0 - margin
 	for attempt in 4:
 		var p := c + Vector3(_rng.randf_range(-reach, reach), 0, _rng.randf_range(-reach, reach))
-		if _clearings.all(func(q: Vector3) -> bool: return p.distance_to(q) > CLEAR_RADIUS):
+		if _clearings.all(func(q: Vector3) -> bool: return Vector2(p.x - q.x, p.z - q.z).length() > CLEAR_RADIUS):
+			p.y = height_at(p.x, p.z)
 			return p
 	return Vector3.INF
 
 
-func _build_ground(ids: Dictionary) -> void:
-	var count := float(_keys.size())
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var half := CELL / 2.0
-	var quads := int(CELL / GROUND_QUAD)
-	for cell: Vector2i in ids:
-		var id: int = ids[cell]
-		var color: Color = _colors.get(id, Color(0.3, 0.2, 0.1))
-		color.a = 1.0 if _cells[cell] == "radiation" else 0.0
-		var u0 := id / count
-		var u1 := (id + 1) / count
-		var c := _cell_center(cell)
-		# The tile's pixel art repeats every GROUND_QUAD metres so it reads at a human scale.
-		for qy in quads:
-			for qx in quads:
-				var x0 := c.x - half + qx * GROUND_QUAD
-				var z0 := c.z - half + qy * GROUND_QUAD
-				var corners := [
-					[Vector3(x0, 0, z0), Vector2(u0, 0)],
-					[Vector3(x0 + GROUND_QUAD, 0, z0), Vector2(u1, 0)],
-					[Vector3(x0 + GROUND_QUAD, 0, z0 + GROUND_QUAD), Vector2(u1, 1)],
-					[Vector3(x0, 0, z0 + GROUND_QUAD), Vector2(u0, 1)],
-				]
-				for i in [0, 1, 2, 0, 2, 3]:
-					st.set_color(color)
-					st.set_normal(Vector3.UP)
-					st.set_uv(corners[i][1])
-					st.add_vertex(corners[i][0])
+## Ground height in metres at a point: gentle rolling noise, shaped by the
+## terrain of the nearby cells (hills higher and rougher, water and marsh in
+## hollows, roads and ruins flattened), blended with the same weights the
+## ground shader uses so heights change as smoothly as the textures.
+func height_at(x: float, z: float) -> float:
+	var g := Vector2(x, z) / CELL
+	var c0 := g.floor()
+	var f := g - c0
+	f = Vector2(smoothstep(0.2, 0.8, f.x), smoothstep(0.2, 0.8, f.y))
+	var offset := 0.0
+	var rough := 0.0
+	for corner: Vector2i in [Vector2i(0, 0), Vector2i(1, 0), Vector2i(0, 1), Vector2i(1, 1)]:
+		var cell := Vector2i(c0) + corner
+		cell = cell.clamp(Vector2i(-radius, -radius), Vector2i(radius, radius))
+		var w := (f.x if corner.x == 1 else 1.0 - f.x) * (f.y if corner.y == 1 else 1.0 - f.y)
+		var r: Array = _relief.get(cell, [0.0, 1.0])
+		offset += r[0] * w
+		rough += r[1] * w
+	var base := _hills.get_noise_2d(x, z) * 1.6 + _bumps.get_noise_2d(x, z) * 0.25
+	return base * rough + offset
+
+
+## The rolling ground: a heightmap 1 m apart for the collider and every
+## MESH_STEP metres for the mesh, covering the arena plus a margin beyond it.
+func _build_ground() -> void:
+	var half := int(half_extent + GROUND_MARGIN)
+	var n := half * 2 + 1
+	var heights := PackedFloat32Array()
+	heights.resize(n * n)
+	for iz in n:
+		for ix in n:
+			heights[iz * n + ix] = height_at(ix - half, iz - half)
+
+	# Mesh: every MESH_STEP-th sample, with normals from the slope for lighting.
+	var step := int(MESH_STEP)
+	@warning_ignore("integer_division")
+	var m := (n - 1) / step + 1
+	var verts := PackedVector3Array()
+	var normals := PackedVector3Array()
+	verts.resize(m * m)
+	normals.resize(m * m)
+	for j in m:
+		for i in m:
+			var ix := i * step
+			var iz := j * step
+			var h := heights[iz * n + ix]
+			verts[j * m + i] = Vector3(ix - half, h, iz - half)
+			var hl := heights[iz * n + maxi(ix - 1, 0)]
+			var hr := heights[iz * n + mini(ix + 1, n - 1)]
+			var hd := heights[maxi(iz - 1, 0) * n + ix]
+			var hu := heights[mini(iz + 1, n - 1) * n + ix]
+			normals[j * m + i] = Vector3(hl - hr, 2.0, hd - hu).normalized()
+	var indices := PackedInt32Array()
+	for j in m - 1:
+		for i in m - 1:
+			var a := j * m + i
+			indices.append_array([a, a + 1, a + m, a + 1, a + m + 1, a + m])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	var ground := MeshInstance3D.new()
-	ground.mesh = st.commit()
-	var mat := ShaderMaterial.new()
-	mat.shader = TERRAIN_SHADER
-	mat.set_shader_parameter(&"atlas", TILES_TEXTURE)
-	ground.material_override = mat
+	ground.mesh = mesh
+	ground.material_override = _ground_material()
 	arena.add_child(ground)
 
-	# Scorched earth beyond the arena, and one floor collider under everything.
+	var floor_body := StaticBody3D.new()
+	floor_body.collision_layer = LAYER_WORLD
+	var floor_shape := CollisionShape3D.new()
+	var map := HeightMapShape3D.new()
+	map.map_width = n
+	map.map_depth = n
+	map.map_data = heights
+	floor_shape.shape = map
+	floor_body.add_child(floor_shape)
+	arena.add_child(floor_body)
+
+	# Scorched earth out to the horizon, below the lowest ground.
 	var outside := MeshInstance3D.new()
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(2000, 2000)
 	outside.mesh = plane
-	outside.position.y = -0.02
+	var lowest := INF
+	for h in heights:
+		lowest = minf(lowest, h)
+	outside.position.y = lowest - 0.5
 	outside.material_override = _plain(Color(0.16, 0.11, 0.07))
 	arena.add_child(outside)
-	var floor_body := StaticBody3D.new()
-	floor_body.collision_layer = LAYER_WORLD
-	var floor_shape := CollisionShape3D.new()
-	floor_shape.shape = WorldBoundaryShape3D.new()
-	floor_body.add_child(floor_shape)
-	arena.add_child(floor_body)
+
+
+func _ground_material() -> ShaderMaterial:
+	var n := 2 * radius + 1
+	var cells := Image.create(n, n, false, Image.FORMAT_R8)
+	for cell: Vector2i in _ids:
+		cells.set_pixel(cell.x + radius, cell.y + radius, Color8(_ids[cell], 0, 0))
+	var count := _keys.size()
+	var palette := Image.create(count, 1, false, Image.FORMAT_RGB8)
+	for id: int in _colors:
+		palette.set_pixel(id, 0, _colors[id])
+	_cells_texture = ImageTexture.create_from_image(cells)
+	var mat := ShaderMaterial.new()
+	mat.shader = TERRAIN_SHADER
+	_share_cell_lookup(mat)
+	mat.set_shader_parameter(&"atlas", TILES_TEXTURE)
+	mat.set_shader_parameter(&"palette", ImageTexture.create_from_image(palette))
+	mat.set_shader_parameter(&"tile_count", float(count))
+	mat.set_shader_parameter(&"texture_metres", GROUND_QUAD)
+	mat.set_shader_parameter(&"glow_id", float(_keys.find_key("radiation")))
+	return mat
+
+
+## The uniforms from arena_cells.gdshaderinc, so the ground and water agree on borders.
+func _share_cell_lookup(mat: ShaderMaterial) -> void:
+	mat.set_shader_parameter(&"cells", _cells_texture)
+	mat.set_shader_parameter(&"breakup", _breakup_texture())
+	mat.set_shader_parameter(&"cell_size", CELL)
+	mat.set_shader_parameter(&"radius", float(radius))
+
+
+## Seamless noise in three independent channels: two to wobble terrain
+## borders, one for broad light and dark patches. Built once.
+static func _breakup_texture() -> ImageTexture:
+	if _breakup:
+		return _breakup
+	var size := 256
+	var layers: Array[Image] = []
+	for i in 3:
+		var noise := FastNoiseLite.new()
+		noise.seed = 1000 + i
+		noise.frequency = 0.02
+		noise.fractal_octaves = 3
+		layers.append(noise.get_seamless_image(size, size))
+	var img := Image.create(size, size, false, Image.FORMAT_RGB8)
+	for y in size:
+		for x in size:
+			img.set_pixel(x, y, Color(layers[0].get_pixel(x, y).r, layers[1].get_pixel(x, y).r, layers[2].get_pixel(x, y).r))
+	_breakup = ImageTexture.create_from_image(img)
+	return _breakup
 
 
 func _build_cells() -> void:
@@ -234,40 +359,50 @@ func _build_cells() -> void:
 	solids.collision_layer = LAYER_WORLD
 	arena.add_child(solids)
 	var glow_cells: Array[Vector2i] = []
+	var water_cells: Array[Vector2i] = []
 	for cell: Vector2i in _cells:
 		var key: String = _cells[cell]
 		var c := _cell_center(cell)
+		# Blocks start SINK metres below the lowest ground under them, so they never float.
+		var ground := minf(minf(height_at(c.x - CELL / 2, c.z - CELL / 2), height_at(c.x + CELL / 2, c.z - CELL / 2)),
+			minf(height_at(c.x - CELL / 2, c.z + CELL / 2), height_at(c.x + CELL / 2, c.z + CELL / 2)))
+		ground = minf(ground, height_at(c.x, c.z)) - SINK
+		var top := height_at(c.x, c.z)
 		if key in SOLID:
-			_add_collider(solids, c + Vector3(0, 2.5, 0), Vector3(CELL, 5, CELL))
+			# Water's wall stops short of the blended shore, which is still walkable.
+			var w := CELL * 0.75 if key == "water" else CELL
+			_add_collider(solids, Vector3(c.x, (ground + top + 5) / 2, c.z), Vector3(w, top + 5 - ground, w))
 		match key:
 			"mountains":
-				var h := _rng.randf_range(16.0, 28.0)
-				_add_box(c + Vector3(0, h / 2, 0), Vector3(CELL, h, CELL), _tile_material("mountains", Color(0.5, 0.48, 0.46)))
-				var cap := h * 0.25
+				var h := _rng.randf_range(16.0, 28.0) + top - ground
+				_add_box(Vector3(c.x, ground + h / 2, c.z), Vector3(CELL, h, CELL), _tile_material("mountains", Color(0.5, 0.48, 0.46)))
+				var cap := (h - (top - ground)) * 0.25
 				var drift := CELL * 0.15
-				_add_box(c + Vector3(_rng.randf_range(-drift, drift), h + cap / 2, _rng.randf_range(-drift, drift)), Vector3(CELL * 0.55, cap, CELL * 0.55), _plain(Color(0.9, 0.9, 0.92)))
+				_add_box(Vector3(c.x + _rng.randf_range(-drift, drift), ground + h + cap / 2, c.z + _rng.randf_range(-drift, drift)), Vector3(CELL * 0.55, cap, CELL * 0.55), _plain(Color(0.9, 0.9, 0.92)))
 			"ruins":
-				var h := _rng.randf_range(9.0, 18.0)
-				_add_box(c + Vector3(0, h / 2, 0), Vector3(CELL * 0.92, h, CELL * 0.92), _tile_material("ruins", Color(0.6, 0.6, 0.6)))
+				var h := _rng.randf_range(9.0, 18.0) + top - ground
+				_add_box(Vector3(c.x, ground + h / 2, c.z), Vector3(CELL * 0.92, h, CELL * 0.92), _tile_material("ruins", Color(0.6, 0.6, 0.6)))
 				for i in _rng.randi_range(1, 3): # Jagged, half-collapsed top.
 					var stub := _rng.randf_range(1.5, 5.0)
 					var reach := CELL * 0.3
-					_add_box(c + Vector3(_rng.randf_range(-reach, reach), h + stub / 2, _rng.randf_range(-reach, reach)), Vector3(CELL * 0.3, stub, CELL * 0.3), _tile_material("ruins", Color(0.6, 0.6, 0.6)))
+					_add_box(Vector3(c.x + _rng.randf_range(-reach, reach), ground + h + stub / 2, c.z + _rng.randf_range(-reach, reach)), Vector3(CELL * 0.3, stub, CELL * 0.3), _tile_material("ruins", Color(0.6, 0.6, 0.6)))
 			"base_wall":
-				_add_box(c + Vector3(0, 2.5, 0), Vector3(CELL, 5, CELL), _tile_material("base_wall", Color.WHITE))
+				var h := 5.0 + top - ground
+				_add_box(Vector3(c.x, ground + h / 2, c.z), Vector3(CELL, h, CELL), _tile_material("base_wall", Color.WHITE))
 			"base_icon":
 				# The base itself, seen from outside: a concrete bunker.
-				_add_box(c + Vector3(0, 3, 0), Vector3(CELL * 0.7, 6, CELL * 0.7), _tile_material("base_wall", Color.WHITE))
-				_add_collider(solids, c + Vector3(0, 3, 0), Vector3(CELL * 0.7, 6, CELL * 0.7))
+				var h := 6.0 + top - ground
+				_add_box(Vector3(c.x, ground + h / 2, c.z), Vector3(CELL * 0.7, h, CELL * 0.7), _tile_material("base_wall", Color.WHITE))
+				_add_collider(solids, Vector3(c.x, ground + h / 2, c.z), Vector3(CELL * 0.7, h, CELL * 0.7))
 			"water":
-				var water := _plain(Color(0.1, 0.35, 0.3, 0.75), Color(0.1, 0.6, 0.3), 0.4)
-				water.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-				_add_box(c + Vector3(0, 0.03, 0), Vector3(CELL, 0.06, CELL), water)
+				water_cells.append(cell)
 			"dead_forest":
 				for i in _rng.randi_range(1, 3):
 					for attempt in 4: # A few tries to find room among the trees already there.
 						var reach := CELL / 2.0 - 1.0
-						if _add_tree(solids, c + Vector3(_rng.randf_range(-reach, reach), 0, _rng.randf_range(-reach, reach))):
+						var at := c + Vector3(_rng.randf_range(-reach, reach), 0, _rng.randf_range(-reach, reach))
+						at.y = height_at(at.x, at.z)
+						if _add_tree(solids, at):
 							break
 			"rubble", "crater":
 				for i in _rng.randi_range(8, 14):
@@ -285,17 +420,9 @@ func _build_cells() -> void:
 						continue
 					var lean := Basis.from_euler(Vector3(_rng.randf_range(-0.4, 0.4), 0, _rng.randf_range(-0.4, 0.4)))
 					_instance(&"tuft", Transform3D(lean, at + Vector3(0, 0.2, 0)))
-			"hills", "dunes":
-				var mound := MeshInstance3D.new()
-				var sphere := SphereMesh.new()
-				sphere.radius = CELL * 0.55
-				sphere.height = 1.2
-				mound.mesh = sphere
-				mound.position = c
-				mound.material_override = _plain(_colors_for(key).darkened(0.2))
-				arena.add_child(mound)
 			"radiation":
 				glow_cells.append(cell)
+	_build_water(water_cells)
 	# A few green lights over the hot zones nearest the fight.
 	glow_cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return a.length_squared() < b.length_squared())
 	for cell in glow_cells.slice(0, MAX_GLOW_LIGHTS):
@@ -303,18 +430,64 @@ func _build_cells() -> void:
 		light.light_color = Color(0.3, 1.0, 0.3)
 		light.light_energy = 2.0
 		light.omni_range = CELL * 0.9
-		light.position = _cell_center(cell) + Vector3(0, 2.0, 0)
+		var c := _cell_center(cell)
+		light.position = Vector3(c.x, height_at(c.x, c.z) + 2.0, c.z)
 		arena.add_child(light)
 
 
+## Toxic water fills the hollows its cells sit in: one surface at one level,
+## about halfway down the hollow, drawn by a shader only where the terrain is
+## water, so its shoreline meanders with the blended ground.
+func _build_water(cells: Array[Vector2i]) -> void:
+	if cells.is_empty():
+		return
+	var rim := 0.0
+	for cell in cells:
+		var c := _cell_center(cell)
+		rim += height_at(c.x, c.z) - RELIEF.water[0] # The ground there without the hollow.
+	var level: float = rim / cells.size() + RELIEF.water[0] * 0.5
+	var surface := MeshInstance3D.new()
+	var plane := PlaneMesh.new()
+	plane.size = Vector2.ONE * (half_extent * 2.0 + CELL * 2.0)
+	surface.mesh = plane
+	surface.position.y = level
+	surface.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mat := ShaderMaterial.new()
+	mat.shader = WATER_SHADER
+	_share_cell_lookup(mat)
+	mat.set_shader_parameter(&"water_id", float(_keys.find_key("water")))
+	surface.material_override = mat
+	arena.add_child(surface)
+
+
+## The edge of the fight: a tall, see-through ring that darkens everything
+## beyond it. Crossing it means fleeing.
 func _build_boundary() -> void:
-	# Rusty posts mark the edge; crossing it means fleeing.
-	var spacing := 4.0
-	var steps := int(2.0 * half_extent / spacing) + 1
-	for i in steps:
-		var t := -half_extent + i * spacing
-		for p in [Vector3(t, 0, -half_extent), Vector3(t, 0, half_extent), Vector3(-half_extent, 0, t), Vector3(half_extent, 0, t)]:
-			_instance(&"post", Transform3D(Basis.IDENTITY, p + Vector3(0, 0.9, 0)))
+	var lowest := INF
+	var highest := -INF
+	for i in 72:
+		var a := TAU * i / 72.0
+		var h := height_at(cos(a) * half_extent, sin(a) * half_extent)
+		lowest = minf(lowest, h)
+		highest = maxf(highest, h)
+	var ring := MeshInstance3D.new()
+	var tube := CylinderMesh.new()
+	tube.top_radius = half_extent
+	tube.bottom_radius = half_extent
+	tube.height = highest - lowest + 50.0
+	tube.cap_top = false
+	tube.cap_bottom = false
+	tube.radial_segments = 128
+	tube.rings = 1
+	ring.mesh = tube
+	ring.position.y = lowest - 2.0 + tube.height / 2.0
+	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var mat := ShaderMaterial.new()
+	mat.shader = BOUNDARY_SHADER
+	mat.set_shader_parameter(&"fade_top", highest + 30.0)
+	mat.set_shader_parameter(&"fade_length", 28.0)
+	ring.material_override = mat
+	arena.add_child(ring)
 
 
 func _build_gun() -> void:
@@ -461,9 +634,6 @@ func _instance(kind: StringName, xform: Transform3D, color := Color.WHITE) -> vo
 			&"tuft":
 				mesh = _unit_box(Vector3(0.06, 0.4, 0.06))
 				material = _plain(Color(0.42, 0.4, 0.17))
-			&"post":
-				mesh = _unit_box(Vector3(0.18, 1.8, 0.18))
-				material = _plain(Color(0.5, 0.2, 0.08), Color(0.6, 0.15, 0.0), 0.3)
 		_batches[kind] = {"mesh": mesh, "material": material, "transforms": [], "colors": []}
 	_batches[kind].transforms.append(xform)
 	_batches[kind].colors.append(color)
@@ -547,17 +717,13 @@ func _tile_material(key: String, tint: Color) -> StandardMaterial3D:
 	return m
 
 
-func _colors_for(key: String) -> Color:
-	return _colors.get(_keys.find_key(key), Color(0.4, 0.3, 0.2))
-
-
 func _spawn_zombie(id: int, at: Vector3) -> void:
 	var z := Zombie3D.new()
 	z.monster_id = id
 	z.target = player
 	# Position before entering the tree: a body that appears at the origin for
 	# even one physics step overlaps the player there and launches them.
-	z.position = at
+	z.position = at + Vector3(0, 0.1, 0)
 	enemies_root.add_child(z)
 	z.died.connect(_on_zombie_died)
 	z.attacked.connect(_on_player_hit)
@@ -622,7 +788,7 @@ func _physics_process(delta: float) -> void:
 		_damage(RADIATION_DPS * delta, false)
 
 	var p := player.global_position
-	if absf(p.x) > half_extent or absf(p.z) > half_extent:
+	if Vector2(p.x, p.z).length() > half_extent:
 		var dir_name := ("right" if p.x > 0 else "left") if absf(p.x) > absf(p.z) else ("down" if p.z > 0 else "up")
 		_end("fled", dir_name)
 

@@ -111,13 +111,17 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
 - **Encounters.** When a zombie and a player end up on the same tile (either
   one walks onto the other), the game switches to first person. Every zombie
   within 8 tiles joins the fight. The 3D arena is built from the real
-  overworld tiles around the encounter: 17×17 tiles, each a 12 m square (about
-  200 m across) with the tile's pixel art repeated on the ground. Mountains,
+  overworld tiles around the encounter: 17×17 tiles, each a 12 m area (about
+  200 m across) with the tile's pixel art repeated on the ground. The ground
+  rolls gently, and terrain shapes it: hills rise, toxic water and marsh sit
+  in hollows, and roads and ruins are flattened. Neighbouring terrain types
+  blend into each other along meandering borders instead of meeting in
+  squares (`client/shaders/`). Mountains,
   ruined buildings, base walls and toxic water are solid; dead forests are
   stands of trees; rubble and craters are strewn with debris; hot zones glow
   and burn (4 HP/s); sludge marsh slows you down.
   Zombies start where they stood on the overworld. Kill them all, or run past
-  the rusty posts at the arena's edge to flee: you come out up to 3 tiles that
+  the dark ring at the arena's edge to flee: you come out up to 3 tiles that
   way on the overworld and the survivors go back to their tiles. Die and you
   wake up in the base's infirmary. Afterwards you get 3 seconds' grace before anything can
   catch you again.
@@ -201,7 +205,9 @@ anyone starts. Each one collides using its own mesh, so trunks, roots and
 branches stop players, zombies and bullets. Models can be any size; they're
 scaled by their height. Without any, the arena falls back to simple stick trees.
 
-To look at an arena of one terrain without running a server:
+To look at an arena of one terrain (or `--terrain mixed` for patches of
+several, to see how they blend; add `--near-edge` to look out through the
+ring at the edge) without running a server:
 
 ```bash
 godot --path client res://tests/arena_preview.tscn -- --terrain dead_forest --screenshot out.png

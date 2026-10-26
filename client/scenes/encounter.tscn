@@ -171,7 +171,7 @@ theme_override_colors/font_color = Color(0.85, 0.85, 0.85, 1)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 4
 theme_override_font_sizes/font_size = 16
-text = "Kill them all, or run past the rusty posts to flee.   WASD: move   Mouse: aim   Click/Space: shoot   Esc: free mouse"
+text = "Kill them all, or run out through the dark ring to flee.   WASD: move   Mouse: aim   Click/Space: shoot   Esc: free mouse"
 horizontal_alignment = 1
 
 [node name="Banner" type="Label" parent="HUD/Root"]

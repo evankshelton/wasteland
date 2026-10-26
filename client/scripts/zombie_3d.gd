@@ -18,6 +18,7 @@ const ATTACK_RANGE := 1.6
 const ATTACK_DAMAGE := 3.0 ## against 6-12 starting hit points
 const ATTACK_INTERVAL := 1.1
 const MAX_HEALTH := 100.0
+const GRAVITY := 20.0
 ## Ground speed (m/s) the walk animation matches at 1x. The bake measures the
 ## real value and stores it on the model; this is the fallback.
 const DEFAULT_WALK_ANIM_SPEED := 0.3
@@ -183,12 +184,14 @@ func _physics_process(delta: float) -> void:
 	if dist > 0.01:
 		rotation.y = atan2(to.x, to.z)
 	var walking := dist > ATTACK_RANGE * 0.8
+	var fall := 0.0 if is_on_floor() else velocity.y - GRAVITY * delta # Follow the ground's slopes.
 	if walking:
 		var forward := to / dist
 		var side := Vector3(forward.z, 0, -forward.x)
 		velocity = (forward + side * sin(_phase * 0.5) * _sway).normalized() * _speed
 	else:
 		velocity = Vector3.ZERO
+	velocity.y = fall
 	move_and_slide()
 
 	_attack_cooldown -= delta
