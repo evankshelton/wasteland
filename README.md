@@ -103,7 +103,7 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   see its `legend`), rooms, NPCs or their lines; restart the server to apply.
 - **Encampments** turn up in about 6% of newly generated chunks (never within
   40 tiles of the base), on open ground. Each has a unique name, shown over its
-  icon on the overworld and on the world map, and its own layout grown from a
+  icon on the overworld (and on your world map once you've been inside), and its own layout grown from a
   saved seed (`server/src/camps.ts`) in one of four styles: an open-air market
   of stalls, a stockade behind scrap barricades, a tent village around a
   campfire, or a ruined building divided into rooms. Each camp has 2–5 booths

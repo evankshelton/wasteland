@@ -52,6 +52,7 @@ var site_info := {} ## the server's "location" message for the base or camp we'r
 var site_icon := Vector2i.ZERO ## that site's icon on the overworld
 var npcs := {} ## Vector2i -> NPC dictionary, while in a site
 var camps := {} ## Vector2i icon position -> encampment name, for every camp we've heard of
+var visited_camps := {} ## Vector2i icon position -> name, for the camps we've been inside (the world map shows only these)
 
 var _site_tiles := PackedByteArray()
 var _site_size := Vector2i.ZERO
@@ -214,6 +215,7 @@ func _handle(msg: Dictionary) -> void:
 		"map_index":
 			for c: Dictionary in msg.get("camps", []):
 				_add_camp(Vector2i(int(c.x), int(c.y)), str(c.name))
+				visited_camps[Vector2i(int(c.x), int(c.y))] = str(c.name)
 			map_view.on_index(msg.chunks)
 		"map_chunk":
 			var coord := Vector2i(int(msg.cx), int(msg.cy))
@@ -274,6 +276,8 @@ func _arrive(msg: Dictionary) -> void:
 	if in_site:
 		site_info = msg
 		site_icon = Vector2i(int(msg.icon.x), int(msg.icon.y)) if msg.has("icon") else Vector2i.ZERO
+		if location == "camp":
+			visited_camps[site_icon] = str(msg.name)
 		_site_size = Vector2i(int(msg.width), int(msg.height))
 		_site_tiles = Marshalls.base64_to_raw(msg.tiles)
 		base_terrain.clear()

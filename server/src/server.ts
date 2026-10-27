@@ -376,6 +376,7 @@ export class GameServer {
       this.send(s, { t: "notice", text: "There's nothing here to enter." });
       return;
     }
+    if (camp) this.storage.visitCamp(p.id, camp.id);
     this.changeLocation(s, loc, site.entry);
   }
 
@@ -563,7 +564,8 @@ export class GameServer {
   /** The world map starts with the list of every generated chunk... */
   private onMap(s: Session): void {
     if (!s.player) return this.fail(s, "not_joined", "Say hello first.");
-    const camps = this.storage.allCamps().map(({ id, name, x, y }) => ({ id, name, x, y }));
+    // Only the camps this player has been inside are charted.
+    const camps = this.storage.visitedCamps(s.player!.id).map(({ id, name, x, y }) => ({ id, name, x, y }));
     this.send(s, { t: "map_index", chunks: this.storage.chunkCoords(), camps });
   }
 

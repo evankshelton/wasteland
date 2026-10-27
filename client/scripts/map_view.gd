@@ -1,7 +1,7 @@
 extends Control
 ## Full-screen world map: every chunk the server has generated so far, drawn at
 ## one coloured pixel per tile (scaled by zoom), with the player, other players
-## and zombies in view, and the base and every known encampment marked by name.
+## and zombies in view, and the base and every encampment the player has been inside marked by name.
 ##
 ## Opening it asks the server for the chunk index, then fetches the chunks this
 ## client doesn't have yet in batches. Chunk data never changes, so each chunk
@@ -189,14 +189,14 @@ func _draw() -> void:
 	var font := get_theme_default_font()
 	var base_pos := _world_to_screen(Vector2(0.5, -9.5))
 	draw_string(font, base_pos + Vector2(-20, -4), "BASE", HORIZONTAL_ALIGNMENT_CENTER, 40, 14, Color.WHITE)
-	for at: Vector2i in game.camps:
+	for at: Vector2i in game.visited_camps:
 		var p := _world_to_screen(Vector2(at) + Vector2(0.5, 0.5))
 		if not Rect2(Vector2.ZERO, size).grow(200).has_point(p):
 			continue
 		var dot := maxf(z * 0.6, 3.0)
 		draw_circle(p, dot + 1.0, Color.BLACK)
 		draw_circle(p, dot, CAMP_COLOR)
-		var label: String = game.camps[at]
+		var label: String = game.visited_camps[at]
 		draw_string_outline(font, p + Vector2(-100, -dot - 4), label, HORIZONTAL_ALIGNMENT_CENTER, 200, 12, 4, Color.BLACK)
 		draw_string(font, p + Vector2(-100, -dot - 4), label, HORIZONTAL_ALIGNMENT_CENTER, 200, 12, CAMP_COLOR)
 
@@ -246,7 +246,7 @@ func _update_info() -> void:
 	var mouse := get_local_mouse_position()
 	var tile := Vector2i(_screen_to_world(mouse).floor())
 	var id: int = game.overworld_tile_at(tile)
-	var terrain: String = game.camps.get(tile, game.tile_names[id] if id >= 0 else "Uncharted")
+	var terrain: String = game.visited_camps.get(tile, game.tile_names[id] if id >= 0 else "Uncharted")
 	var z := _zoom()
 	var zoom_text := "%dx" % int(z) if z >= 1.0 else "1/%dx" % int(1.0 / z)
 	info_label.text = "(%d, %d)  %s    zoom %s" % [tile.x, tile.y, terrain, zoom_text]

@@ -52,6 +52,8 @@ export class Storage {
     campByName: StatementSync;
     campsIn: StatementSync;
     allCamps: StatementSync;
+    visitCamp: StatementSync;
+    visitedCamps: StatementSync;
   };
 
   constructor(path: string) {
@@ -89,6 +91,12 @@ export class Storage {
         created_at INTEGER NOT NULL
       );
       CREATE UNIQUE INDEX IF NOT EXISTS camps_at ON camps (x, y);
+      CREATE TABLE IF NOT EXISTS camp_visits (
+        player_id  INTEGER NOT NULL,
+        camp_id    INTEGER NOT NULL,
+        visited_at INTEGER NOT NULL,
+        PRIMARY KEY (player_id, camp_id)
+      );
     `);
     this.upgradeSchema();
     this.q = {
@@ -110,6 +118,10 @@ export class Storage {
       campByName: this.db.prepare("SELECT id FROM camps WHERE name = ?"),
       campsIn: this.db.prepare("SELECT id, x, y, name, seed FROM camps WHERE x >= ? AND x < ? AND y >= ? AND y < ?"),
       allCamps: this.db.prepare("SELECT id, x, y, name, seed FROM camps"),
+      visitCamp: this.db.prepare("INSERT OR IGNORE INTO camp_visits (player_id, camp_id, visited_at) VALUES (?, ?, ?)"),
+      visitedCamps: this.db.prepare(
+        "SELECT c.id, c.x, c.y, c.name, c.seed FROM camps c JOIN camp_visits v ON v.camp_id = c.id WHERE v.player_id = ?",
+      ),
     };
   }
 
@@ -188,6 +200,16 @@ export class Storage {
 
   allCamps(): CampRecord[] {
     return this.q.allCamps.all() as unknown as CampRecord[];
+  }
+
+  /** Remember that a player has been inside a camp (it then shows on their world map). */
+  visitCamp(playerId: number, campId: number): void {
+    this.q.visitCamp.run(playerId, campId, Date.now());
+  }
+
+  /** The camps a player has been inside. */
+  visitedCamps(playerId: number): CampRecord[] {
+    return this.q.visitedCamps.all(playerId) as unknown as CampRecord[];
   }
 
   saveCharacter(id: number, char: Character): void {

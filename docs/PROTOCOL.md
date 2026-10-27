@@ -44,7 +44,7 @@ Source of truth: `server/src/protocol.ts` (server) and `client/scripts/net.gd` (
 | `player`      | `id`, `name`, `x`, `y` | Another player on the same map is within view (40 tiles) or moved. |
 | `player_left` | `id` | That player left view, changed map or disconnected. |
 | `camp`        | `id`, `name`, `x`, `y` | An encampment whose icon is at `x`, `y`, sent right after the `chunk` holding it. Names are unique. |
-| `map_index`   | `chunks` (array of `[cx, cy]`), `camps` (array of `{id, name, x, y}`) | Every chunk anyone has generated so far, and every encampment in them. |
+| `map_index`   | `chunks` (array of `[cx, cy]`), `camps` (array of `{id, name, x, y}`) | Every chunk anyone has generated so far, and every encampment this player has been inside (the world map shows only those). |
 | `map_chunk`   | `cx`, `cy`, `tiles` | Same encoding as `chunk`, for the world map. It doesn't count as streamed: walking there later still sends a `chunk`. |
 | `map_batch_done` | — | Ends the reply to one `map_chunks` request; the client sends the next batch. |
 | `monster`     | `id`, `kind` (`zombie`), `count`, `x`, `y` | A monster came within view (40 tiles) or moved. `count` is how many it stands for in a fight (a pack of 1–15). |

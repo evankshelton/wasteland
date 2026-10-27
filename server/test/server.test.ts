@@ -641,6 +641,8 @@ test("players enter an encampment from its icon and leave by walking off its edg
   const camp = foundCamps((server as any).world, (server as any).storage).find((k) => far(k.x) || far(k.y))!;
   const p = onlyPlayer(server);
   [p.x, p.y] = [camp.x, camp.y]; // Arrive on the icon.
+  c.send({ t: "map" });
+  assert.deepEqual((await c.until("map_index")).camps, [], "camps are off the world map until you've been inside");
   c.send({ t: "enter" });
   const loc = await c.until("location");
   assert.deepEqual([loc.kind, loc.name, loc.icon], ["camp", camp.name, { x: camp.x, y: camp.y }]);
@@ -671,7 +673,7 @@ test("players enter an encampment from its icon and leave by walking off its edg
   assert.equal(out.kind, "overworld");
   assert.ok([`${camp.x + dx},${camp.y + dy}`, `${camp.x},${camp.y}`].includes(`${out.x},${out.y}`), "out beside the icon");
 
-  // The client hears about camps in the land it's sent, and the world map lists them all.
+  // The client hears about camps in the land it's sent, and the world map now lists this one.
   for (;;) if ((await c.until("camp")).id === camp.id) break;
   c.send({ t: "map" });
   const index = await c.until("map_index");

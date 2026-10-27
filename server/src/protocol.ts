@@ -63,7 +63,7 @@ export type ServerMsg =
   | { t: "you"; x: number; y: number; seq: number; ok: boolean }
   | { t: "player"; id: number; name: string; x: number; y: number }
   | { t: "player_left"; id: number }
-  | { t: "map_index"; chunks: [number, number][]; camps: { id: number; name: string; x: number; y: number }[] } // everything generated so far
+  | { t: "map_index"; chunks: [number, number][]; camps: { id: number; name: string; x: number; y: number }[] } // every chunk generated so far, and the camps this player has been inside
   | { t: "camp"; id: number; name: string; x: number; y: number } // an encampment in a chunk just sent
   | { t: "map_chunk"; cx: number; cy: number; tiles: string } // like chunk, but for the world map only
   | { t: "map_batch_done" }
