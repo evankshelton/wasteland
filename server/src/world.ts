@@ -2,6 +2,8 @@
 // stored the first time anyone comes near them.
 import { randomInt } from "node:crypto";
 import type { Storage } from "./storage.ts";
+import { campName, campSeed, campSpot } from "./camps.ts";
+import { T } from "./tiles.ts";
 import { CHUNK_SIZE, WORLD_VERSION, generateChunk } from "./worldgen.ts";
 
 export const chunkOf = (v: number) => Math.floor(v / CHUNK_SIZE);
@@ -58,10 +60,23 @@ export class World {
     tiles = this.storage.getChunk(cx, cy);
     if (!tiles) {
       tiles = generateChunk(this.seed, cx, cy);
+      // Now and then, new land holds an encampment.
+      const spot = campSpot(this.seed, cx, cy, tiles);
+      if (spot) tiles[spot.ly * CHUNK_SIZE + spot.lx] = T.CAMP_ICON;
       this.storage.putChunk(cx, cy, tiles);
+      if (spot) this.foundCamp(cx * CHUNK_SIZE + spot.lx, cy * CHUNK_SIZE + spot.ly);
     }
     this.cache.set(key, tiles);
     return tiles;
+  }
+
+  /** Record a new encampment under a name no other camp has. */
+  private foundCamp(x: number, y: number): void {
+    let attempt = 0;
+    let name = campName(this.seed, x, y, attempt);
+    while (this.storage.campNameTaken(name)) name = campName(this.seed, x, y, ++attempt);
+    const camp = this.storage.createCamp(x, y, name, campSeed(this.seed, x, y));
+    console.log(`[world] founded ${camp.name} at (${x}, ${y})`);
   }
 
   /** Like chunk(), but never generates: undefined if nobody has been near it yet. */

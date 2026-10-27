@@ -46,14 +46,18 @@ var monsters := {} ## monster id -> Sprite2D
 var monster_positions := {} ## monster id -> Vector2i
 var encounter: Node3D ## the first-person fight, while one is running
 var last_encounter_result := ""
-## "overworld" or "base": which map pos (and every position from the server) refers to.
+## "overworld", "base" or "camp": which map pos (and every position from the server) refers to.
 var location := "overworld"
-var base_info := {} ## the server's base "location" message: name, rooms, npcs...
-var npcs := {} ## Vector2i -> NPC dictionary, while in the base
+var site_info := {} ## the server's "location" message for the base or camp we're in: name, rooms, npcs...
+var site_icon := Vector2i.ZERO ## that site's icon on the overworld
+var npcs := {} ## Vector2i -> NPC dictionary, while in a site
+var camps := {} ## Vector2i icon position -> encampment name, for every camp we've heard of
 
-var _base_tiles := PackedByteArray()
-var _base_size := Vector2i.ZERO
+var _site_tiles := PackedByteArray()
+var _site_size := Vector2i.ZERO
 var _base_icon_id := -1
+var _camp_icon_id := -1
+var _camp_labels: Node2D ## camp names floating over their icons on the overworld
 var _counter_id := -1
 var _arrived := false
 var _dialog_npc := {}
@@ -105,9 +109,13 @@ func _ready() -> void:
 		tile_passable[id] = bool(t.passable)
 		match str(t.key):
 			"base_icon": _base_icon_id = id
+			"camp_icon": _camp_icon_id = id
 			"counter": _counter_id = id
 	terrain.tile_set = _build_tileset(tile_names.size())
 	base_terrain.tile_set = terrain.tile_set
+	_camp_labels = Node2D.new()
+	add_child(_camp_labels)
+	move_child(_camp_labels, base_terrain.get_index() + 1)
 	map_view.setup(self, welcome.tiles)
 
 	%ResumeButton.pressed.connect(_set_paused.bind(false))
@@ -201,7 +209,11 @@ func _handle(msg: Dictionary) -> void:
 				"victory": _log("The dead lie still. You survived.")
 				"fled": _log("You got away... for now.")
 				"died": _log("You died. You wake up in the base's infirmary.")
+		"camp":
+			_add_camp(Vector2i(int(msg.x), int(msg.y)), str(msg.name))
 		"map_index":
+			for c: Dictionary in msg.get("camps", []):
+				_add_camp(Vector2i(int(c.x), int(c.y)), str(c.name))
 			map_view.on_index(msg.chunks)
 		"map_chunk":
 			var coord := Vector2i(int(msg.cx), int(msg.cy))
@@ -226,26 +238,48 @@ func _apply_chunk(coord: Vector2i, data: PackedByteArray) -> void:
 		_update_status()
 
 
-## Switch to the map in a server "location" message: the overworld, or the base.
+## An encampment's name over its icon on the overworld (and on the world map).
+func _add_camp(at: Vector2i, camp_name: String) -> void:
+	if camps.has(at):
+		return
+	camps[at] = camp_name
+	var label := Label.new()
+	label.text = camp_name
+	label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	label.add_theme_font_size_override("font_size", 9)
+	label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.45))
+	label.add_theme_color_override("font_outline_color", Color.BLACK)
+	label.add_theme_constant_override("outline_size", 4)
+	label.size = Vector2(160, 12)
+	label.position = _tile_center(at) + Vector2(-80, -TILE * 1.25)
+	_camp_labels.add_child(label)
+	if location == "overworld" and at == pos:
+		_update_status()
+
+
+## Switch to the map in a server "location" message: the overworld, or a site
+## (the base or an encampment), whose whole map comes in the message.
 func _arrive(msg: Dictionary) -> void:
 	_close_dialog()
 	map_view.close()
 	_pending_seq = -1
 	location = str(msg.kind)
-	var in_base := location == "base"
-	terrain.visible = not in_base
-	base_terrain.visible = in_base
+	var in_site := location != "overworld"
+	terrain.visible = not in_site
+	_camp_labels.visible = not in_site
+	base_terrain.visible = in_site
 	for n in npcs_root.get_children():
 		n.queue_free()
 	npcs.clear()
-	if in_base:
-		base_info = msg
-		_base_size = Vector2i(int(msg.width), int(msg.height))
-		_base_tiles = Marshalls.base64_to_raw(msg.tiles)
+	if in_site:
+		site_info = msg
+		site_icon = Vector2i(int(msg.icon.x), int(msg.icon.y)) if msg.has("icon") else Vector2i.ZERO
+		_site_size = Vector2i(int(msg.width), int(msg.height))
+		_site_tiles = Marshalls.base64_to_raw(msg.tiles)
 		base_terrain.clear()
-		for i in _base_tiles.size():
+		for i in _site_tiles.size():
 			@warning_ignore("integer_division")
-			base_terrain.set_cell(Vector2i(i % _base_size.x, i / _base_size.x), 0, Vector2i(_base_tiles[i], 0))
+			base_terrain.set_cell(Vector2i(i % _site_size.x, i / _site_size.x), 0, Vector2i(_site_tiles[i], 0))
 		for n: Dictionary in msg.npcs:
 			var at := Vector2i(int(n.x), int(n.y))
 			npcs[at] = n
@@ -333,12 +367,12 @@ func _set_pos(p: Vector2i, snap := false) -> void:
 
 # ---- the enter / use key ----
 
-## Enter the base from its icon; inside, talk to whoever is next to you or across a counter.
+## Enter the base or an encampment from its icon; inside, talk to whoever is next to you or across a counter.
 func use() -> void:
 	if dialog.visible:
 		_next_line()
 	elif location == "overworld":
-		if tile_at(pos) == _base_icon_id:
+		if tile_at(pos) in [_base_icon_id, _camp_icon_id]:
 			Net.send({"t": "enter"})
 		else:
 			_log("There's nothing here to enter.")
@@ -404,6 +438,9 @@ func _start_encounter(msg: Dictionary) -> void:
 
 func _on_encounter_finished(result: String, killed: Array, dir: String, id: int) -> void:
 	var msg := {"t": "encounter_end", "id": id, "result": result, "killed": killed, "hp": encounter.health}
+	var remaining: Dictionary = encounter.remaining()
+	if not remaining.is_empty():
+		msg.remaining = remaining
 	if not dir.is_empty():
 		msg.dir = dir
 	Net.send(msg)
@@ -417,7 +454,8 @@ func _show_overworld(on: bool) -> void:
 	for node: CanvasItem in [players_root, monsters_root, npcs_root, avatar]:
 		node.visible = on
 	terrain.visible = on and location == "overworld"
-	base_terrain.visible = on and location == "base"
+	_camp_labels.visible = terrain.visible
+	base_terrain.visible = on and location != "overworld"
 	hud.visible = on
 	camera.enabled = on
 
@@ -428,18 +466,18 @@ func chunk_of(p: Vector2i) -> Vector2i:
 	return Vector2i(floori(float(p.x) / chunk_size), floori(float(p.y) / chunk_size))
 
 
-## Where the player is on the overworld: their position, or the base icon while inside.
+## Where the player is on the overworld: their position, or the icon of the site they're inside.
 func overworld_pos() -> Vector2i:
-	return pos if location == "overworld" else Vector2i.ZERO
+	return pos if location == "overworld" else site_icon
 
 
 ## Tile id at a position on the current map, or -1 if unknown (a chunk that
-## hasn't arrived, or off the edge of the base).
+## hasn't arrived, or off the edge of the base or camp).
 func tile_at(p: Vector2i) -> int:
-	if location == "base":
-		if p.x < 0 or p.y < 0 or p.x >= _base_size.x or p.y >= _base_size.y:
+	if location != "overworld":
+		if p.x < 0 or p.y < 0 or p.x >= _site_size.x or p.y >= _site_size.y:
 			return -1
-		return _base_tiles[p.y * _base_size.x + p.x]
+		return _site_tiles[p.y * _site_size.x + p.x]
 	return overworld_tile_at(p)
 
 
@@ -574,11 +612,11 @@ func _sheet(c: Dictionary) -> String:
 
 func _update_status() -> void:
 	var vitals := "   " + _vitals(Net.character)
-	if location == "base":
-		status_label.text = "%s   %s: %s%s" % [Net.welcome.get("name", ""), base_info.get("name", "Base"), _room_at(pos), vitals]
+	if location != "overworld":
+		status_label.text = "%s   %s: %s%s" % [Net.welcome.get("name", ""), site_info.get("name", "Base"), _room_at(pos), vitals]
 		return
 	var tile := tile_at(pos)
-	var where := tile_names[tile] if tile >= 0 else "..."
+	var where: String = camps.get(pos, tile_names[tile] if tile >= 0 else "...")
 	# Directions back to the base at the origin (+y is south).
 	var to_base := PackedStringArray()
 	if pos.y != 0:
@@ -590,10 +628,10 @@ func _update_status() -> void:
 
 
 func _room_at(p: Vector2i) -> String:
-	for room: Dictionary in base_info.get("rooms", []):
+	for room: Dictionary in site_info.get("rooms", []):
 		if Rect2i(int(room.x), int(room.y), int(room.w), int(room.h)).has_point(p):
 			return str(room.name)
-	return "Outside the walls"
+	return "Outside the walls" if location == "base" else "The camp grounds"
 
 
 func _log(line: String) -> void:

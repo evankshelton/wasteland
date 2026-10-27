@@ -6,8 +6,9 @@ import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { WebSocket } from "ws";
 import { BaseMap } from "../src/base.ts";
+import { BOOTH_TYPES, CAMP_MIN_BASE_DISTANCE, CAMP_STYLES, campLayout, checkLayout } from "../src/camps.ts";
 import { XP, gainXp, raise, rollCharacter, xpForLevel } from "../src/character.ts";
-import { DEFAULT_MONSTER_OPTIONS, Monsters, inSafeZone, type MonsterOptions } from "../src/monsters.ts";
+import { DEFAULT_MONSTER_OPTIONS, Monsters, inSafeZone, rollPackSize, type MonsterOptions } from "../src/monsters.ts";
 import { GameServer } from "../src/server.ts";
 import { Storage } from "../src/storage.ts";
 import { isPassable, T } from "../src/tiles.ts";
@@ -18,7 +19,7 @@ const dir = mkdtempSync(join(tmpdir(), "wasteland-test-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 const BASE_MAP = BaseMap.load();
-const V = 6; // protocol version
+const V = 8; // protocol version
 let nextPort = 17777 + Math.floor(Math.random() * 1000);
 
 async function boot(dbPath: string, monsters: Partial<MonsterOptions> = {}) {
@@ -366,8 +367,8 @@ function zombieWorld(opts: Partial<MonsterOptions> = {}) {
   return new Monsters(world, { ...DEFAULT_MONSTER_OPTIONS, ...opts });
 }
 
-function addZombie(monsters: Monsters, id: number, x: number, y: number, nextStepAt = 0) {
-  monsters.all.set(id, { id, kind: "zombie", x, y, nextStepAt, lastNearPlayerAt: 0 });
+function addZombie(monsters: Monsters, id: number, x: number, y: number, nextStepAt = 0, count = 1) {
+  monsters.all.set(id, { id, kind: "zombie", count, x, y, nextStepAt, lastNearPlayerAt: 0 });
 }
 
 const hunter = (x: number, y: number, targetable = true) => ({ id: 1, x, y, targetable });
@@ -419,6 +420,25 @@ test("zombies shamble slowly onto players but never next to the base", () => {
   assert.notEqual(ignored.all.get(1)!.y, 12, "untargetable players aren't chased onto");
 });
 
+test("each zombie is a pack of 1-15, mostly big", () => {
+  const sizes = new Array(17).fill(0);
+  let sum = 0;
+  for (let i = 0; i < 10_000; i++) {
+    const n = rollPackSize();
+    sizes[n]++;
+    sum += n;
+  }
+  assert.equal(sizes[0] + sizes[16], 0);
+  assert.equal(sizes.slice(1, 16).reduce((a: number, b: number) => a + b, 0), 10_000, "always 1-15");
+  const mean = sum / 10_000;
+  assert.ok(mean > 7.5 && mean < 9, `average pack ${mean.toFixed(1)} is about 8`);
+  assert.ok(sizes[15] > sizes[1] && sizes[8] > sizes[2], "big packs are more likely than small ones");
+
+  const monsters = zombieWorld({ spawnChance: 1 });
+  for (let t = 0; t < 20; t++) monsters.tick(t, [hunter(0, 60)]);
+  for (const m of monsters.all.values()) assert.ok(m.count >= 1 && m.count <= 15);
+});
+
 test("zombies with nobody around eventually despawn", () => {
   const monsters = zombieWorld({ despawnAfterMs: 1000 });
   addZombie(monsters, 1, 0, 20);
@@ -435,12 +455,13 @@ test("clients see zombies approach, and a zombie reaching the player starts an e
   addZombie(srv.server.monsters, 1001, 3, 19, Date.now() + 60_000); // within 8 tiles: joins the fight
   addZombie(srv.server.monsters, 1002, 0, 30, Date.now() + 60_000); // too far: stays on the map
   await c.move("up"); // (0, 11): moving re-syncs nearby monsters
-  assert.equal((await c.until("monster")).id, 1000);
+  const seen = await c.until("monster");
+  assert.deepEqual([seen.id, seen.count], [1000, 1], "the overworld sees the pack size");
 
   srv.server.monsters.all.get(1000)!.nextStepAt = 0; // Let it walk (tickMs is 20 in tests).
   const start = await c.until("encounter_start");
   assert.deepEqual([start.x, start.y, start.radius], [0, 11, 8]);
-  assert.deepEqual(start.enemies.map((e: any) => [e.id, e.dx, e.dy]).sort(), [[1000, 0, 0], [1001, 3, 8]]);
+  assert.deepEqual(start.enemies.map((e: any) => [e.id, e.count, e.dx, e.dy]).sort(), [[1000, 1, 0, 0], [1001, 1, 3, 8]]);
   assert.ok(!srv.server.monsters.all.has(1000) && srv.server.monsters.all.has(1002));
 
   assert.equal((await c.move("down")).ok, false, "no overworld moves mid-fight");
@@ -516,6 +537,35 @@ test("encounters end in victory, flight or death", async () => {
   await srv.stop();
 });
 
+test("packs: every zombie killed earns XP, and partly killed packs come back smaller", async () => {
+  const srv = await boot(":memory:");
+  const { c } = await walkOut(srv.port, "Hunter");
+  const mons = srv.server.monsters;
+  addZombie(mons, 1, 0, 13, Date.now() + 60_000, 3); // a pack of 3 (survives, down to 1)
+  addZombie(mons, 2, 0, 19, Date.now() + 60_000, 2); // a pack of 2 (wiped out)
+  await c.move("down");
+  const start = await c.until("encounter_start");
+  assert.deepEqual(start.enemies.map((e: any) => [e.id, e.count]).sort(), [[1, 3], [2, 2]]);
+
+  const xpBefore = onlyPlayer(srv.server).char.xp;
+  c.send({ t: "encounter_end", id: start.id, result: "fled", killed: [2], remaining: { 1: 1 }, dir: "up" });
+  await c.until("encounter_over");
+  const ch = (await c.until("character")).character;
+  const bonus = 1 + Math.max(0, ch.int - 12) / 100;
+  assert.equal(ch.xp - xpBefore, Math.round(4 * XP.kill * bonus), "2 + 2 zombies killed");
+  assert.deepEqual([...mons.all.values()].map((m) => [m.id, m.count]), [[1, 1]], "one zombie left of the pack of 3");
+
+  // A pack can't grow back through a report.
+  await new Promise((r) => setTimeout(r, 350));
+  await c.move("down");
+  const again = await c.until("encounter_start");
+  c.send({ t: "encounter_end", id: again.id, result: "fled", killed: [], remaining: { 1: 15 }, dir: "up" });
+  await c.until("encounter_over");
+  assert.equal(mons.all.get(1)!.count, 1);
+  await c.close();
+  await srv.stop();
+});
+
 test("Doc Ellis heals you in the infirmary", async () => {
   const srv = await boot(":memory:");
   const { c } = await enterGame(srv.port, "Patient");
@@ -535,4 +585,97 @@ test("Doc Ellis heals you in the infirmary", async () => {
   assert.match((await c.until("notice")).text, /patches you up/);
   await c.close();
   await srv.stop();
+});
+
+// ---- encampments ----
+
+test("every encampment layout is playable, and the styles and booths vary", () => {
+  const styles = new Set<string>();
+  const services = new Set<string>();
+  const shapes = new Set<string>();
+  for (let i = 0; i < 300; i++) {
+    const def = campLayout(1000 + i * 37, `Camp ${i}`);
+    assert.ok(checkLayout(def), `layout ${i} (${def.style}) is playable`);
+    const site = new BaseMap(def, { x: 0, y: 0 }); // throws on a bad entry
+    assert.ok(site.npcs.length >= 2 && site.npcs.length <= BOOTH_TYPES.length);
+    assert.equal(new Set(site.npcs.map((n) => n.role)).size, site.npcs.length, "no booth type twice in one camp");
+    styles.add(def.style);
+    shapes.add(def.map.join("\n"));
+    for (const n of site.npcs) services.add(n.service);
+  }
+  assert.deepEqual([...styles].sort(), [...CAMP_STYLES].sort(), "indoor and outdoor styles all turn up");
+  assert.equal(services.size, BOOTH_TYPES.length, "every booth type turns up somewhere");
+  assert.ok(shapes.size > 290, "layouts differ from camp to camp");
+  assert.deepEqual(campLayout(77, "Same"), campLayout(77, "Same"), "a camp's layout comes from its seed");
+});
+
+/** Generate the chunks within r of the origin and return the camps founded there. */
+function foundCamps(world: World, storage: Storage, r = 5) {
+  for (let cy = -r; cy <= r; cy++) for (let cx = -r; cx <= r; cx++) world.chunk(cx, cy);
+  return storage.allCamps();
+}
+
+test("encampments are founded in new land, away from the base, each with its own name", () => {
+  const a = new Storage(join(dir, "camps-a.db"));
+  const camps = foundCamps(new World(a, 4242), a);
+  assert.ok(camps.length >= 2, `found ${camps.length} camps`);
+  const w = new World(a, 4242);
+  for (const c of camps) {
+    assert.equal(w.tileAt(c.x, c.y), T.CAMP_ICON, `${c.name} has its icon`);
+    assert.ok(Math.max(Math.abs(c.x), Math.abs(c.y)) >= CAMP_MIN_BASE_DISTANCE, `${c.name} is clear of the base`);
+  }
+  assert.equal(new Set(camps.map((c) => c.name.toLowerCase())).size, camps.length, "names are unique");
+  assert.equal(a.campsIn(-1000, -1000, 1000, 1000).length, camps.length);
+  const b = new Storage(join(dir, "camps-b.db"));
+  const again = foundCamps(new World(b, 4242), b);
+  assert.deepEqual(again.map((c) => [c.x, c.y, c.name]), camps.map((c) => [c.x, c.y, c.name]), "same seed, same camps");
+  a.close();
+  b.close();
+});
+
+test("players enter an encampment from its icon and leave by walking off its edge", { timeout: 20_000 }, async () => {
+  const { port, server, stop } = await boot(join(dir, "camp-walk.db"));
+  const { c } = await walkOut(port, "Drifter");
+  // One beyond the land already sent on the walk out, so its news arrives when we leave it.
+  const far = (v: number) => Math.abs(Math.floor(v / CHUNK_SIZE)) > 1;
+  const camp = foundCamps((server as any).world, (server as any).storage).find((k) => far(k.x) || far(k.y))!;
+  const p = onlyPlayer(server);
+  [p.x, p.y] = [camp.x, camp.y]; // Arrive on the icon.
+  c.send({ t: "enter" });
+  const loc = await c.until("location");
+  assert.deepEqual([loc.kind, loc.name, loc.icon], ["camp", camp.name, { x: camp.x, y: camp.y }]);
+  assert.equal(p.loc, `camp:${camp.id}`);
+
+  // Walk the shortest way to an edge, then off it.
+  const site = new BaseMap(campLayout(camp.seed, camp.name), camp);
+  const dirs = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] } as const;
+  const prev = new Map<string, [string, string]>();
+  const queue: [number, number][] = [[site.entry.x, site.entry.y]];
+  const start = `${site.entry.x},${site.entry.y}`;
+  let exit: [number, number, string] | undefined;
+  while (queue.length && !exit) {
+    const [x, y] = queue.shift()!;
+    for (const [d, [dx, dy]] of Object.entries(dirs)) {
+      const [nx, ny] = [x + dx, y + dy];
+      if (!site.inBounds(nx, ny)) { exit = [x, y, d]; break; }
+      const k = `${nx},${ny}`;
+      if (site.walkable(nx, ny) && !prev.has(k) && k !== start) (prev.set(k, [`${x},${y}`, d]), queue.push([nx, ny]));
+    }
+  }
+  const path: string[] = [exit![2]];
+  for (let k = `${exit![0]},${exit![1]}`; prev.has(k); k = prev.get(k)![0]) path.unshift(prev.get(k)![1]);
+  for (const d of path.slice(0, -1)) assert.ok((await c.move(d)).ok, `step ${d}`);
+  await c.move(path.at(-1)!);
+  const out = await c.until("location");
+  const [dx, dy] = dirs[path.at(-1) as keyof typeof dirs];
+  assert.equal(out.kind, "overworld");
+  assert.ok([`${camp.x + dx},${camp.y + dy}`, `${camp.x},${camp.y}`].includes(`${out.x},${out.y}`), "out beside the icon");
+
+  // The client hears about camps in the land it's sent, and the world map lists them all.
+  for (;;) if ((await c.until("camp")).id === camp.id) break;
+  c.send({ t: "map" });
+  const index = await c.until("map_index");
+  assert.ok(index.camps.some((k: any) => k.id === camp.id && k.name === camp.name));
+  await c.close();
+  await stop();
 });

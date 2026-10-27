@@ -3,7 +3,7 @@
 
 import { ABILITIES, type Ability, type Character } from "./character.ts";
 
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 8;
 
 /** Most chunk coordinates a client may ask for in one map_chunks request. */
 export const MAP_BATCH_MAX = 256;
@@ -23,7 +23,17 @@ export type ClientMsg =
   | { t: "move"; dir: Dir; seq: number }
   | { t: "map" }
   | { t: "map_chunks"; coords: [number, number][] }
-  | { t: "encounter_end"; id: number; result: EncounterResult; killed: number[]; dir?: Dir; hp?: number }
+  | {
+      t: "encounter_end";
+      id: number;
+      result: EncounterResult;
+      /** Monsters whose whole pack was killed. */
+      killed: number[];
+      /** Monster id -> zombies still standing, for packs only partly killed. */
+      remaining?: Record<string, number>;
+      dir?: Dir;
+      hp?: number;
+    }
   | { t: "enter" } // go into the base while standing on its icon
   | { t: "reroll" } // roll new abilities (only before accepting a character)
   | { t: "accept" } // keep the current roll and start playing
@@ -53,10 +63,11 @@ export type ServerMsg =
   | { t: "you"; x: number; y: number; seq: number; ok: boolean }
   | { t: "player"; id: number; name: string; x: number; y: number }
   | { t: "player_left"; id: number }
-  | { t: "map_index"; chunks: [number, number][] } // every chunk generated so far
+  | { t: "map_index"; chunks: [number, number][]; camps: { id: number; name: string; x: number; y: number }[] } // everything generated so far
+  | { t: "camp"; id: number; name: string; x: number; y: number } // an encampment in a chunk just sent
   | { t: "map_chunk"; cx: number; cy: number; tiles: string } // like chunk, but for the world map only
   | { t: "map_batch_done" }
-  | { t: "monster"; id: number; kind: string; x: number; y: number } // appeared in view or moved
+  | { t: "monster"; id: number; kind: string; count: number; x: number; y: number } // appeared in view or moved
   | { t: "monster_left"; id: number }
   // A zombie reached the player: fight every enemy within `radius` tiles in first person.
   // Enemy dx/dy are tile offsets from the player at (x, y).
@@ -67,7 +78,7 @@ export type ServerMsg =
       y: number;
       radius: number;
       seed: number;
-      enemies: { id: number; kind: string; dx: number; dy: number }[];
+      enemies: { id: number; kind: string; count: number; dx: number; dy: number }[];
     }
   | { t: "encounter_over"; id: number; result: EncounterResult; x: number; y: number }
   // Which map the player is on. Sent after welcome and whenever it changes;
@@ -75,8 +86,10 @@ export type ServerMsg =
   | { t: "location"; kind: "overworld"; x: number; y: number }
   | {
       t: "location";
-      kind: "base";
+      kind: "base" | "camp";
       name: string;
+      /** The site's icon on the overworld. */
+      icon: { x: number; y: number };
       width: number;
       height: number;
       tiles: string; // base64, row-major tile ids
@@ -126,9 +139,16 @@ export function parseClientMsg(raw: string): ClientMsg | undefined {
       if (!Array.isArray(o.killed) || o.killed.length > 256 || !o.killed.every(Number.isSafeInteger)) return undefined;
       if (o.dir !== undefined && (typeof o.dir !== "string" || !(o.dir in DIR_DELTA))) return undefined;
       if (o.hp !== undefined && (typeof o.hp !== "number" || !Number.isFinite(o.hp))) return undefined;
+      let remaining: Record<string, number> | undefined;
+      if (o.remaining !== undefined) {
+        if (typeof o.remaining !== "object" || o.remaining === null || Array.isArray(o.remaining)) return undefined;
+        const entries = Object.entries(o.remaining as Record<string, unknown>);
+        if (entries.length > 256 || !entries.every(([, v]) => Number.isSafeInteger(v))) return undefined;
+        remaining = Object.fromEntries(entries) as Record<string, number>;
+      }
       return {
         t: "encounter_end", id: o.id, result: o.result as EncounterResult, killed: o.killed as number[],
-        dir: o.dir as Dir | undefined, hp: o.hp as number | undefined,
+        remaining, dir: o.dir as Dir | undefined, hp: o.hp as number | undefined,
       };
     }
     case "reroll":

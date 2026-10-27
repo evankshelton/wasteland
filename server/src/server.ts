@@ -3,7 +3,8 @@
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import { DIR_DELTA, PROTOCOL_VERSION, parseClientMsg, validName, type ClientMsg, type ServerMsg } from "./protocol.ts";
-import type { BaseMap } from "./base.ts";
+import { BaseMap } from "./base.ts";
+import { campLayout } from "./camps.ts";
 import { XP, gainXp, raise, rollCharacter, type Character } from "./character.ts";
 import { Monsters, inSafeZone, type Monster, type MonsterOptions } from "./monsters.ts";
 import type { Location, Storage } from "./storage.ts";
@@ -59,7 +60,7 @@ interface Player {
   x: number;
   y: number;
   loc: Location;
-  /** Position on the base map while loc is "base". */
+  /** Position on the site's map (the base or a camp) while loc isn't "overworld". */
   bx: number;
   by: number;
   char: Character;
@@ -67,7 +68,7 @@ interface Player {
 
 /** Which map a player is on and where, in that map's coordinates. */
 function whereIs(p: Player): { loc: Location; x: number; y: number } {
-  return p.loc === "base" ? { loc: "base", x: p.bx, y: p.by } : { loc: "overworld", x: p.x, y: p.y };
+  return p.loc !== "overworld" ? { loc: p.loc, x: p.bx, y: p.by } : { loc: "overworld", x: p.x, y: p.y };
 }
 
 const log = (...args: unknown[]) => console.log(new Date().toISOString(), ...args);
@@ -83,6 +84,7 @@ export class GameServer {
   private world: World;
   private storage: Storage;
   private base: BaseMap;
+  private camps = new Map<number, BaseMap>(); // camp maps built so far, by camp id
   private opts: ServerOptions;
 
   constructor(world: World, storage: Storage, base: BaseMap, opts: ServerOptions) {
@@ -211,8 +213,10 @@ export class GameServer {
     // One live session per character: the newest connection wins and takes
     // over the live position (the stored one may be a few seconds stale).
     let pos: Omit<Player, "id" | "name" | "char"> = { x: rec.x, y: rec.y, loc: rec.loc, bx: rec.bx, by: rec.by };
-    if (pos.loc === "base" && !this.base.walkable(pos.bx, pos.by)) {
-      ({ x: pos.bx, y: pos.by } = this.base.entry); // The base layout changed under them.
+    if (pos.loc !== "overworld") {
+      const site = this.siteOf(pos.loc);
+      if (!site) pos.loc = "overworld"; // That camp is gone: back outside.
+      else if (!site.walkable(pos.bx, pos.by)) ({ x: pos.bx, y: pos.by } = site.entry); // Its layout changed under them.
     }
     const existing = this.byPlayerId.get(rec.id);
     if (existing?.player) {
@@ -287,8 +291,8 @@ export class GameServer {
   /** Talking to an NPC: the ones with a working service do it. */
   private onService(s: Session, npcId: number): void {
     const p = s.player;
-    if (!p || p.loc !== "base") return;
-    const npc = this.base.npcs.find((n) => n.id === npcId);
+    if (!p || p.loc === "overworld") return;
+    const npc = this.siteOf(p.loc)?.npcs.find((n) => n.id === npcId);
     // In reach: next to them, or across a counter.
     if (!npc || Math.abs(npc.x - p.bx) + Math.abs(npc.y - p.by) > 2) return;
     if (npc.service === "healing") {
@@ -321,18 +325,34 @@ export class GameServer {
     this.send(s, { t: "character", character: s.player!.char });
   }
 
-  /** Tell the client which map it's on (the whole map, for the base). */
+  /** The map for a site location: the base, or a camp (built from its seed the first time). */
+  private siteOf(loc: Location): BaseMap | undefined {
+    if (loc === "base") return this.base;
+    if (!loc.startsWith("camp:")) return undefined;
+    const id = Number(loc.slice(5));
+    let site = this.camps.get(id);
+    if (!site) {
+      const camp = this.storage.campById(id);
+      if (!camp) return undefined;
+      site = new BaseMap(campLayout(camp.seed, camp.name), { x: camp.x, y: camp.y });
+      this.camps.set(id, site);
+    }
+    return site;
+  }
+
+  /** Tell the client which map it's on (the whole map, for the base or a camp). */
   private sendLocation(s: Session): void {
     const p = s.player!;
-    if (p.loc === "overworld") {
+    const b = p.loc === "overworld" ? undefined : this.siteOf(p.loc);
+    if (!b) {
       this.send(s, { t: "location", kind: "overworld", x: p.x, y: p.y });
       return;
     }
-    const b = this.base;
     this.send(s, {
       t: "location",
-      kind: "base",
+      kind: p.loc === "base" ? "base" : "camp",
       name: b.name,
+      icon: b.icon,
       width: b.width,
       height: b.height,
       tiles: Buffer.from(b.tiles).toString("base64"),
@@ -343,23 +363,27 @@ export class GameServer {
     });
   }
 
-  /** Step through the base icon into the base. */
+  /** Step through the base's (or an encampment's) icon into it. */
   private onEnter(s: Session): void {
     const p = s.player;
     if (!p) return this.fail(s, "not_joined", "Say hello first.");
     if (p.loc !== "overworld" || s.encounter) return;
-    if (this.world.tileAt(p.x, p.y) !== T.BASE_ICON) {
+    const tile = this.world.tileAt(p.x, p.y);
+    const camp = tile === T.CAMP_ICON ? this.storage.campAt(p.x, p.y) : undefined;
+    const loc: Location | undefined = tile === T.BASE_ICON ? "base" : camp ? `camp:${camp.id}` : undefined;
+    const site = loc && this.siteOf(loc);
+    if (!loc || !site) {
       this.send(s, { t: "notice", text: "There's nothing here to enter." });
       return;
     }
-    this.changeLocation(s, "base", this.base.entry);
+    this.changeLocation(s, loc, site.entry);
   }
 
-  /** Move a player between the overworld and the base, and re-sync everything they can see. */
+  /** Move a player between the overworld and a site, and re-sync everything they can see. */
   private changeLocation(s: Session, loc: Location, at: { x: number; y: number }): void {
     const p = s.player!;
     p.loc = loc;
-    if (loc === "base") {
+    if (loc !== "overworld") {
       p.bx = at.x;
       p.by = at.y;
     } else {
@@ -375,13 +399,13 @@ export class GameServer {
   }
 
   /**
-   * Walking off the base map's edge: come out on the overworld tile on that
-   * side of the base icon (or on the icon itself if that tile is blocked).
+   * Walking off a site map's edge: come out on the overworld tile on that
+   * side of its icon (or on the icon itself if that tile is blocked).
    */
-  private exitTile(dx: number, dy: number): { x: number; y: number } {
-    const out = { x: BASE.icon.x + dx, y: BASE.icon.y + dy };
+  private exitTile(site: BaseMap, dx: number, dy: number): { x: number; y: number } {
+    const out = { x: site.icon.x + dx, y: site.icon.y + dy };
     const clear = isPassable(this.world.tileAt(out.x, out.y)) && !this.monsters.at(out.x, out.y);
-    return clear ? out : { ...BASE.icon };
+    return clear ? out : { ...site.icon };
   }
 
   private onMove(s: Session, msg: Extract<ClientMsg, { t: "move" }>): void {
@@ -389,7 +413,7 @@ export class GameServer {
     if (!p) return this.fail(s, "not_joined", "Say hello first.");
 
     const now = Date.now();
-    if (p.loc === "base") return this.onMoveInBase(s, p, msg, now);
+    if (p.loc !== "overworld") return this.onMoveInSite(s, p, msg, now);
     let ok = false;
     let contact = false;
     if (!s.encounter && now - s.lastMoveAt >= this.opts.moveIntervalMs) {
@@ -416,7 +440,8 @@ export class GameServer {
     else if (ok) this.syncMonsters(s);
   }
 
-  private onMoveInBase(s: Session, p: Player, msg: Extract<ClientMsg, { t: "move" }>, now: number): void {
+  private onMoveInSite(s: Session, p: Player, msg: Extract<ClientMsg, { t: "move" }>, now: number): void {
+    const site = this.siteOf(p.loc)!;
     if (now - s.lastMoveAt < this.opts.moveIntervalMs) {
       this.send(s, { t: "you", x: p.bx, y: p.by, seq: msg.seq, ok: false });
       return;
@@ -424,16 +449,16 @@ export class GameServer {
     const [dx, dy] = DIR_DELTA[msg.dir];
     const nx = p.bx + dx;
     const ny = p.by + dy;
-    if (!this.base.inBounds(nx, ny)) {
+    if (!site.inBounds(nx, ny)) {
       // Answer the step first, then switch maps: "you" carries the overworld
       // position the following "location" message confirms.
       s.lastMoveAt = now;
-      const out = this.exitTile(dx, dy);
+      const out = this.exitTile(site, dx, dy);
       this.send(s, { t: "you", x: out.x, y: out.y, seq: msg.seq, ok: true });
       this.changeLocation(s, "overworld", out);
       return;
     }
-    const ok = this.base.walkable(nx, ny);
+    const ok = site.walkable(nx, ny);
     if (ok) {
       p.bx = nx;
       p.by = ny;
@@ -452,7 +477,8 @@ export class GameServer {
     s.encounter = enc;
     const removed = enemies.map((m) => m.id);
     for (const other of this.sessions) if (other.player) this.syncMonsters(other, undefined, removed);
-    log(`[encounter] "${p.name}" vs ${enemies.length} zombie(s) at (${p.x}, ${p.y})`);
+    const total = enemies.reduce((n, m) => n + m.count, 0);
+    log(`[encounter] "${p.name}" vs ${total} zombie(s) in ${enemies.length} pack(s) at (${p.x}, ${p.y})`);
     this.send(s, {
       t: "encounter_start",
       id: enc.id,
@@ -460,7 +486,7 @@ export class GameServer {
       y: enc.y,
       radius: this.opts.encounterRadius,
       seed: randomInt(1, 2 ** 31 - 1),
-      enemies: enemies.map((m) => ({ id: m.id, kind: m.kind, dx: m.x - enc.x, dy: m.y - enc.y })),
+      enemies: enemies.map((m) => ({ id: m.id, kind: m.kind, count: m.count, dx: m.x - enc.x, dy: m.y - enc.y })),
     });
   }
 
@@ -472,6 +498,16 @@ export class GameServer {
     const survivors = enc.enemies.filter((m) => !killed.has(m.id));
     if (msg.result === "victory" && survivors.length > 0) {
       return this.fail(s, "bad_message", "Claimed victory with enemies still standing.");
+    }
+    // Every zombie in a killed pack counts, plus those taken from packs that survived.
+    let kills = 0;
+    for (const m of enc.enemies) if (killed.has(m.id)) kills += m.count;
+    for (const m of survivors) {
+      const left = msg.remaining?.[String(m.id)];
+      if (left === undefined) continue;
+      const standing = Math.max(1, Math.min(m.count, left)); // Packs only shrink, and a survivor is at least one.
+      kills += m.count - standing;
+      m.count = standing;
     }
 
     if (msg.result === "fled" && msg.dir) {
@@ -490,7 +526,6 @@ export class GameServer {
 
     this.endEncounter(s, survivors);
     s.dirty = true;
-    const kills = enc.enemies.length - survivors.length;
     log(`[encounter] "${p.name}" ${msg.result} (${kills} killed) -> (${p.x}, ${p.y})`);
     // Health only goes down in a fight; dying means waking up healed in the infirmary.
     const c = p.char;
@@ -528,7 +563,8 @@ export class GameServer {
   /** The world map starts with the list of every generated chunk... */
   private onMap(s: Session): void {
     if (!s.player) return this.fail(s, "not_joined", "Say hello first.");
-    this.send(s, { t: "map_index", chunks: this.storage.chunkCoords() });
+    const camps = this.storage.allCamps().map(({ id, name, x, y }) => ({ id, name, x, y }));
+    this.send(s, { t: "map_index", chunks: this.storage.chunkCoords(), camps });
   }
 
   /** ...then fetches the ones it lacks in batches. Never generates new land. */
@@ -579,6 +615,9 @@ export class GameServer {
       const tiles = this.world.chunk(cx, cy);
       s.sentChunks.add(`${cx},${cy}`);
       this.send(s, { t: "chunk", cx, cy, tiles: Buffer.from(tiles).toString("base64") });
+      for (const camp of this.storage.campsIn(cx * CHUNK_SIZE, cy * CHUNK_SIZE, (cx + 1) * CHUNK_SIZE, (cy + 1) * CHUNK_SIZE)) {
+        this.send(s, { t: "camp", id: camp.id, name: camp.name, x: camp.x, y: camp.y });
+      }
     }
     if (discovered > 0) this.award(s, discovered * XP.explore, "");
   }
@@ -637,7 +676,7 @@ export class GameServer {
       const near = p.loc === "overworld" && Math.max(Math.abs(m.x - p.x), Math.abs(m.y - p.y)) <= this.opts.viewTiles;
       if (near) {
         if (!s.seenMonsters.has(m.id) || changed?.has(m.id)) {
-          this.send(s, { t: "monster", id: m.id, kind: m.kind, x: m.x, y: m.y });
+          this.send(s, { t: "monster", id: m.id, kind: m.kind, count: m.count, x: m.x, y: m.y });
           s.seenMonsters.add(m.id);
         }
       } else if (s.seenMonsters.delete(m.id)) {

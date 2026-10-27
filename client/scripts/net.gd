@@ -11,7 +11,7 @@ signal disconnected(reason: String)
 ## The player's character changed: a reroll, accepting it, XP, a level, health...
 signal character_changed(character: Dictionary)
 
-const PROTOCOL_VERSION := 6
+const PROTOCOL_VERSION := 8
 const CONNECT_TIMEOUT_MS := 8000
 
 ## The server's welcome message while joined, otherwise empty.

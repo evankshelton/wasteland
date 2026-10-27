@@ -1,5 +1,6 @@
-// The base interior: a small town map entered from the base icon on the
-// overworld, defined in shared/base.json. Walking off any edge leaves it.
+// Sites: small town maps entered from an icon on the overworld, like Ultima IV
+// cities. The base is defined in shared/base.json; encampments are generated
+// in the same format (camps.ts). Walking off any edge leaves a site.
 import { readFileSync } from "node:fs";
 import { isPassable, tileId } from "./tiles.ts";
 
@@ -22,7 +23,7 @@ export interface Room {
   h: number;
 }
 
-interface BaseFile {
+export interface BaseFile {
   name: string;
   legend: Record<string, string>;
   map: string[];
@@ -41,8 +42,11 @@ export class BaseMap {
   readonly respawn: { x: number; y: number };
   readonly npcs: Npc[];
   readonly rooms: Room[];
+  /** Where the site's icon is on the overworld; leaving comes out next to it. */
+  readonly icon: { x: number; y: number };
 
-  constructor(def: BaseFile) {
+  constructor(def: BaseFile, icon = { x: 0, y: 0 }) {
+    this.icon = icon;
     this.name = def.name;
     this.height = def.map.length;
     this.width = def.map[0]?.length ?? 0;
@@ -65,6 +69,7 @@ export class BaseMap {
     }
   }
 
+  /** The base, from shared/base.json. */
   static load(): BaseMap {
     const path = new URL("../../shared/base.json", import.meta.url);
     return new BaseMap(JSON.parse(readFileSync(path, "utf8")) as BaseFile);

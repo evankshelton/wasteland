@@ -10,6 +10,11 @@ extends Node
 ## key, walk out of the south gate, step back onto the base icon, enter again
 ## with the enter key, and leave once more before the usual checks.
 ##
+## --expect-camp plays a brand-new character against a server that puts the
+## player on an encampment's icon the first time they leave the base: it must
+## show the camp's name, enter with the enter key, find the camp's booths, and
+## walk back out off an edge.
+##
 ## --expect-encounter also waits for zombies to catch the player, checks the
 ## first-person arena, shoots a zombie, wins that fight, then waits for another
 ## and flees across the arena's edge. Needs a server with a high zombie spawn
@@ -17,7 +22,7 @@ extends Node
 ##
 ## Without --headless it also saves screenshots (--screenshot <path>; the map
 ## view goes to <path> with "_map" before the extension, the fight to "_fps",
-## the base to "_base").
+## the base to "_base", the camp to "_camp").
 
 const GAME_SCENE := preload("res://scenes/game.tscn")
 const CREATION_SCENE := preload("res://scenes/character_creation.tscn")
@@ -28,13 +33,15 @@ var player_name := "SmokeTest"
 var screenshot := ""
 var expect_encounter := false
 var expect_base := false
+var expect_camp := false
 
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
 	expect_encounter = "--expect-encounter" in args
 	expect_base = "--expect-base" in args
-	if expect_base and "--name" not in args:
+	expect_camp = "--expect-camp" in args
+	if (expect_base or expect_camp) and "--name" not in args:
 		player_name = "Recruit%d" % (randi() % 100000)
 	for i in args.size() - 1:
 		match args[i]:
@@ -51,6 +58,10 @@ func _run() -> void:
 		return
 	if expect_base:
 		var problem: String = await _test_base(game)
+		if not problem.is_empty():
+			return _finish(false, problem)
+	if expect_camp:
+		var problem: String = await _test_camp(game)
 		if not problem.is_empty():
 			return _finish(false, problem)
 	var start: Vector2i = game.pos
@@ -119,7 +130,7 @@ func _test_base(game: Node) -> String:
 	if game.npcs.size() < 5:
 		return "only %d NPCs in the base" % game.npcs.size()
 	var entry: Vector2i = game.pos
-	print("in %s at %s (%s) with %d NPCs" % [game.base_info.name, entry, game._room_at(entry), game.npcs.size()])
+	print("in %s at %s (%s) with %d NPCs" % [game.site_info.name, entry, game._room_at(entry), game.npcs.size()])
 
 	# The gate guard stands next to the entrance: the enter key talks to him.
 	_send_action(&"enter")
@@ -151,6 +162,61 @@ func _test_base(game: Node) -> String:
 	await _steps(game, &"move_down", 4)
 	if game.location != "overworld":
 		return "couldn't leave the base again"
+	return ""
+
+
+## Returns "" on success, otherwise what went wrong.
+func _test_camp(game: Node) -> String:
+	await _steps(game, &"move_down", 4) # Out of the base's south gate...
+	if not await _wait_until(func() -> bool: return game.location == "overworld" and game.tile_at(game.pos) >= 0):
+		return "didn't leave the base"
+	var icon: Vector2i = game.pos # ...and the test server drops us on a camp.
+	if game.tile_at(icon) != game._camp_icon_id:
+		return "came out on %s at %s, not an encampment" % [game.tile_names[game.tile_at(icon)], icon]
+	if not await _wait_until(func() -> bool: return game.camps.has(icon)):
+		return "never heard the name of the camp at %s" % icon
+	var camp_name: String = game.camps[icon]
+	print("on the icon of %s at %s" % [camp_name, icon])
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_campicon." + screenshot.get_extension())
+	_send_action(&"enter")
+	if not await _wait_until(func() -> bool: return game.location == "camp"):
+		return "the enter key on the camp icon didn't go inside"
+	if game.site_info.name != camp_name or game.overworld_pos() != icon:
+		return "entered %s (icon %s), expected %s at %s" % [game.site_info.name, game.overworld_pos(), camp_name, icon]
+	if game.npcs.size() < 2:
+		return "%s has %d booths" % [camp_name, game.npcs.size()]
+	var roles := PackedStringArray()
+	for n: Dictionary in game.npcs.values():
+		roles.append("%s %s" % [n.role, n.name])
+	print("in %s: %s" % [camp_name, ", ".join(roles)])
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_camp." + screenshot.get_extension())
+
+	# Out again by the shortest way to an edge.
+	var dirs := {&"move_up": Vector2i.UP, &"move_down": Vector2i.DOWN, &"move_left": Vector2i.LEFT, &"move_right": Vector2i.RIGHT}
+	var came_from := {game.pos: []}
+	var queue: Array[Vector2i] = [game.pos]
+	var path: Array = []
+	while not queue.is_empty() and path.is_empty():
+		var at: Vector2i = queue.pop_front()
+		for action: StringName in dirs:
+			var next: Vector2i = at + dirs[action]
+			if game.tile_at(next) < 0:
+				path = came_from[at] + [action]
+				break
+			if not came_from.has(next) and game.tile_passable[game.tile_at(next)] and not game.npcs.has(next):
+				came_from[next] = came_from[at] + [action]
+				queue.append(next)
+	if path.is_empty():
+		return "no way out of %s" % camp_name
+	for action: StringName in path:
+		await _steps(game, action, 1)
+	if not await _wait_until(func() -> bool: return game.location == "overworld"):
+		return "walking off %s's edge didn't leave it" % camp_name
+	if absi(game.pos.x - icon.x) + absi(game.pos.y - icon.y) > 1:
+		return "left %s at %s, expected beside its icon %s" % [camp_name, game.pos, icon]
+	print("left %s at %s" % [camp_name, game.pos])
 	return ""
 
 

@@ -4,25 +4,39 @@
 [ext_resource type="Theme" path="res://ui/theme.tres" id="2_theme"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_dust"]
-sky_top_color = Color(0.14, 0.09, 0.07, 1)
-sky_horizon_color = Color(0.58, 0.34, 0.16, 1)
+sky_top_color = Color(0.1, 0.09, 0.085, 1)
+sky_horizon_color = Color(0.3, 0.25, 0.2, 1)
 ground_bottom_color = Color(0.08, 0.06, 0.05, 1)
-ground_horizon_color = Color(0.42, 0.26, 0.14, 1)
+ground_horizon_color = Color(0.22, 0.18, 0.14, 1)
 
 [sub_resource type="Sky" id="Sky_dust"]
 sky_material = SubResource("ProceduralSkyMaterial_dust")
 
 [sub_resource type="Environment" id="Environment_waste"]
-background_mode = 2
+background_mode = 1
+background_color = Color(0, 0, 0, 1)
 sky = SubResource("Sky_dust")
 ambient_light_source = 3
-ambient_light_color = Color(0.6, 0.45, 0.35, 1)
-ambient_light_energy = 0.7
+ambient_light_color = Color(0.6, 0.55, 0.5, 1)
+ambient_light_energy = 0.3
 tonemap_mode = 2
 glow_enabled = true
 fog_enabled = true
-fog_light_color = Color(0.42, 0.28, 0.17, 1)
-fog_density = 0.007
+fog_mode = 1
+fog_light_color = Color(0, 0, 0, 1)
+fog_sun_scatter = 0.0
+fog_density = 1.0
+fog_aerial_perspective = 0.0
+fog_sky_affect = 1.0
+fog_height = 0.5
+fog_height_density = 0.08
+fog_depth_curve = 0.6
+fog_depth_begin = 3.0
+fog_depth_end = 18.0
+adjustment_enabled = true
+adjustment_brightness = 0.85
+adjustment_contrast = 1.05
+adjustment_saturation = 0.8
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
 radius = 0.35
@@ -47,8 +61,8 @@ environment = SubResource("Environment_waste")
 
 [node name="Sun" type="DirectionalLight3D" parent="."]
 unique_name_in_owner = true
-light_color = Color(1, 0.78, 0.55, 1)
-light_energy = 1.1
+light_color = Color(1, 0.9, 0.78, 1)
+light_energy = 0.6
 shadow_enabled = true
 
 [node name="Arena" type="Node3D" parent="."]

@@ -59,8 +59,10 @@ func _run() -> void:
 	var enc: Node3D = ENCOUNTER_SCENE.instantiate()
 	add_child(enc)
 	enc.setup(self, {"x": 0, "y": 0, "radius": 8, "seed": 1234, "enemies": [
-		{"id": 1, "kind": "zombie", "dx": 0, "dy": -2},
-		{"id": 2, "kind": "zombie", "dx": 2, "dy": -3},
+		{"id": 1, "kind": "zombie", "count": 15, "dx": 0, "dy": -2},
+		{"id": 2, "kind": "zombie", "count": 12, "dx": 2, "dy": -3},
+		{"id": 3, "kind": "zombie", "count": 15, "dx": -3, "dy": -4},
+		{"id": 4, "kind": "zombie", "count": 10, "dx": 4, "dy": 1},
 	]})
 	enc.player.rotation.y = 0.0 # Look north, towards the zombies.
 	if near_edge:

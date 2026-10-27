@@ -33,8 +33,8 @@ The first time you join with a name you roll a character (see *Characters*
 below): reroll as often as you like, then accept. Move with the arrow keys or
 WASD. Esc opens the menu, which shows your character sheet.
 
-Stand on the base icon and press **E** to go inside. The base is its own small
-map, like an Ultima IV city: walk off any edge to leave, and you come out on
+Stand on the base icon (or an encampment's) and press **E** to go inside. Each
+is its own small map, like an Ultima IV city: walk off any edge to leave, and you come out on
 the overworld tile on that side of the icon. Inside, press E (or walk into
 someone) to talk to the NPC next to you or across a counter.
 
@@ -101,6 +101,15 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   other NPCs talk about their trade, but there's no money, inventory or
   radiation to trade in yet. Edit `shared/base.json` to change the layout (one character per tile,
   see its `legend`), rooms, NPCs or their lines; restart the server to apply.
+- **Encampments** turn up in about 6% of newly generated chunks (never within
+  40 tiles of the base), on open ground. Each has a unique name, shown over its
+  icon on the overworld and on the world map, and its own layout grown from a
+  saved seed (`server/src/camps.ts`) in one of four styles: an open-air market
+  of stalls, a stockade behind scrap barricades, a tent village around a
+  campfire, or a ruined building divided into rooms. Each camp has 2–5 booths
+  drawn from ten trades: gunsmith, armorer, medic, rad doc, scrap trader, water
+  seller, cook, barkeep, mechanic and rumormonger. Camp medics heal like Doc
+  Ellis; the rest only talk for now. Zombies don't step onto camp icons.
 - **Radioactive zombies** spawn out in the wasteland, 12–18 tiles from a player
   (just off screen), more readily in hot zones. They shamble one tile every
   0.9s (players are about 7× faster) towards the nearest player within 20
@@ -112,11 +121,17 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   one walks onto the other), the game switches to first person. Every zombie
   within 8 tiles joins the fight. The 3D arena is built from the real
   overworld tiles around the encounter: 17×17 tiles, each a 12 m area (about
-  200 m across) with the tile's pixel art repeated on the ground. The ground
+  200 m across). Instead of the overworld's pixel art, the ground uses
+  realistic textures with normal maps (cracked earth, dry grass, forest
+  litter, gravel, asphalt, rock, ash, charred ground, irradiated soil, mud and
+  concrete; see *Ground textures* below). The ground
   rolls gently, and terrain shapes it: hills rise, toxic water and marsh sit
   in hollows, and roads and ruins are flattened. Neighbouring terrain types
   blend into each other along meandering borders instead of meeting in
-  squares (`client/shaders/`). Mountains,
+  squares (`client/shaders/`). Thick fog closes in a few metres out and
+  fades everything to black by 18 m, with no horizon, with fog banks
+  drifting by and dust and ash hanging in the air, so zombies loom out of the haze only
+  once they're near. Mountains,
   ruined buildings, base walls and toxic water are solid; dead forests are
   stands of trees; rubble and craters are strewn with debris; hot zones glow
   and burn (4 HP/s); sludge marsh slows you down.
@@ -125,6 +140,14 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   way on the overworld and the survivors go back to their tiles. Die and you
   wake up in the base's infirmary. Afterwards you get 3 seconds' grace before anything can
   catch you again.
+
+  Each zombie on the overworld stands for a **pack of 1–15** in a fight,
+  fixed when it spawns and not shown on the overworld. Big packs are the
+  likelier ones (about 8 on average; the odds are `PACK_SIZE_WEIGHTS` in
+  `server/src/monsters.ts`). The pack appears clustered where its zombie
+  stood, each one starting to move after a random moment so they don't march
+  in step. XP is per zombie killed, and a pack you leave partly dead comes
+  back smaller.
 
   Controls: WASD/arrows move, mouse aims, left click or Space shoots
   (`shoot` action), Esc frees the mouse (click to recapture). The client runs
@@ -147,7 +170,9 @@ npm run tiles       # rebuild client/assets/tiles.png + sprites.png from server/
 
 Client end-to-end test (with a server running). Add `--expect-base` to play a
 brand-new character through the base: start inside, talk to the gate guard,
-walk out, step onto the icon and press E to go back in.
+walk out, step onto the icon and press E to go back in. `--expect-camp` does
+the same for an encampment, against a server that drops the player on a camp's
+icon the first time they leave the base.
 
 ```bash
 godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 --port 7777
@@ -217,8 +242,29 @@ It prints fps and draw calls after a few seconds, saves the screenshot, and
 quits. Add `--check-trees` to also shoot the nearest tree and walk into it; it
 exits with code 1 if either passes through.
 
+### Ground textures
+
+The first-person arena's ground textures are generated, not drawn:
+`client/tools/make_ground_textures.gd` layers seamless noise into eleven
+512×512 colour and normal maps in `client/assets/ground/`. Edit a recipe
+there and regenerate:
+
+```bash
+godot --headless --path client -s res://tools/make_ground_textures.gd
+```
+
+```bash
+godot --headless --path client --import
+```
+
+Which terrain uses which texture (and how glossy it is) is `GROUND_FOR` in
+`client/scripts/encounter.gd`. Mountains are wrapped in the rock texture and
+ruins and base walls in concrete.
+
 ### Adding a terrain type
 
 1. Add it to `shared/tiles.json` (next free id, plus its world-map `color`).
 2. Draw it in `server/tools/make_tiles.ts` and run `npm run tiles`.
 3. Place it in `server/src/worldgen.ts` (and add an ASCII glyph in `tools/ascii_map.ts`).
+4. For the first-person arena, give it a ground texture in `GROUND_FOR` (and a
+   height in `RELIEF`) in `client/scripts/encounter.gd`.

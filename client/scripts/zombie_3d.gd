@@ -35,6 +35,9 @@ static var _flash_material: StandardMaterial3D
 var monster_id := 0
 var health := MAX_HEALTH
 var target: Node3D
+## Seconds to stand swaying before it starts shambling, so a pack lurches
+## into motion one by one rather than all at once.
+var wake_delay := 0.0
 
 var _speed := 0.9
 var _walk_anim_speed := DEFAULT_WALK_ANIM_SPEED
@@ -111,7 +114,7 @@ func _build_model() -> void:
 		_anim.play(_walk)
 		# Out of step with each other, and stride matched to this zombie's pace.
 		_anim.seek(randf() * _anim.get_animation(_walk).length, true)
-		_anim.speed_scale = _speed / _walk_anim_speed
+		_anim.speed_scale = 0.15 if wake_delay > 0.0 else _speed / _walk_anim_speed
 	# Step the animation with the body's movement (physics ticks), not render
 	# frames, so planted feet stay put between ticks.
 	_anim.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_PHYSICS
@@ -176,6 +179,14 @@ func _material(color: Color, glow := 0.0) -> StandardMaterial3D:
 func _physics_process(delta: float) -> void:
 	_update_flash(delta)
 	if _dead or target == null:
+		return
+	if wake_delay > 0.0:
+		# Not moving yet: stay put (still falling to the ground), swaying slowly.
+		wake_delay -= delta
+		velocity = Vector3(0.0, 0.0 if is_on_floor() else velocity.y - GRAVITY * delta, 0.0)
+		move_and_slide()
+		if _anim and _anim.current_animation == _walk:
+			_anim.speed_scale = 0.15
 		return
 	_phase += delta * 4.0
 	var to := target.global_position - global_position

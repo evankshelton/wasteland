@@ -4,7 +4,17 @@ import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { Character } from "./character.ts";
 
-export type Location = "overworld" | "base";
+/** Which map a player is on: the overworld, the base, or an encampment by id. */
+export type Location = "overworld" | "base" | `camp:${number}`;
+
+export interface CampRecord {
+  id: number;
+  x: number;
+  y: number;
+  name: string;
+  /** The camp's layout grows from this (camps.ts campLayout). */
+  seed: number;
+}
 
 export interface PlayerRecord {
   id: number;
@@ -36,6 +46,12 @@ export class Storage {
     insertPlayer: StatementSync;
     savePlayer: StatementSync;
     saveCharacter: StatementSync;
+    insertCamp: StatementSync;
+    campAt: StatementSync;
+    campById: StatementSync;
+    campByName: StatementSync;
+    campsIn: StatementSync;
+    allCamps: StatementSync;
   };
 
   constructor(path: string) {
@@ -64,6 +80,15 @@ export class Storage {
         created_at INTEGER NOT NULL,
         last_seen  INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS camps (
+        id         INTEGER PRIMARY KEY,
+        x          INTEGER NOT NULL,
+        y          INTEGER NOT NULL,
+        name       TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+        seed       INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS camps_at ON camps (x, y);
     `);
     this.upgradeSchema();
     this.q = {
@@ -79,6 +104,12 @@ export class Storage {
       ),
       savePlayer: this.db.prepare("UPDATE players SET x = ?, y = ?, location = ?, base_x = ?, base_y = ?, last_seen = ? WHERE id = ?"),
       saveCharacter: this.db.prepare("UPDATE players SET character = ? WHERE id = ?"),
+      insertCamp: this.db.prepare("INSERT INTO camps (x, y, name, seed, created_at) VALUES (?, ?, ?, ?, ?)"),
+      campAt: this.db.prepare("SELECT id, x, y, name, seed FROM camps WHERE x = ? AND y = ?"),
+      campById: this.db.prepare("SELECT id, x, y, name, seed FROM camps WHERE id = ?"),
+      campByName: this.db.prepare("SELECT id FROM camps WHERE name = ?"),
+      campsIn: this.db.prepare("SELECT id, x, y, name, seed FROM camps WHERE x >= ? AND x < ? AND y >= ? AND y < ?"),
+      allCamps: this.db.prepare("SELECT id, x, y, name, seed FROM camps"),
     };
   }
 
@@ -131,6 +162,32 @@ export class Storage {
     if (!row) return undefined;
     const { character, ...rec } = row;
     return { ...rec, char: character ? (JSON.parse(character) as Character) : undefined };
+  }
+
+  createCamp(x: number, y: number, name: string, seed: number): CampRecord {
+    const res = this.q.insertCamp.run(x, y, name, seed, Date.now());
+    return { id: Number(res.lastInsertRowid), x, y, name, seed };
+  }
+
+  campAt(x: number, y: number): CampRecord | undefined {
+    return this.q.campAt.get(x, y) as CampRecord | undefined;
+  }
+
+  campById(id: number): CampRecord | undefined {
+    return this.q.campById.get(id) as CampRecord | undefined;
+  }
+
+  campNameTaken(name: string): boolean {
+    return this.q.campByName.get(name) !== undefined;
+  }
+
+  /** Camps with x0 <= x < x1 and y0 <= y < y1. */
+  campsIn(x0: number, y0: number, x1: number, y1: number): CampRecord[] {
+    return this.q.campsIn.all(x0, x1, y0, y1) as unknown as CampRecord[];
+  }
+
+  allCamps(): CampRecord[] {
+    return this.q.allCamps.all() as unknown as CampRecord[];
   }
 
   saveCharacter(id: number, char: Character): void {

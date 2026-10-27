@@ -12,10 +12,28 @@ export type MonsterKind = "zombie";
 export interface Monster {
   id: number;
   kind: MonsterKind;
+  /** How many zombies this one stands for in a first-person fight (a pack of 1-15). */
+  count: number;
   x: number;
   y: number;
   nextStepAt: number;
   lastNearPlayerAt: number;
+}
+
+/**
+ * Relative chance of each pack size, 1 to 15: rising to a peak around 7-9 and
+ * staying high, so most packs are big (about 8 on average) and small ones are rare.
+ */
+export const PACK_SIZE_WEIGHTS = [3, 4, 5, 6, 7, 8, 8, 8, 8, 7, 7, 6, 6, 5, 5] as const;
+
+export function rollPackSize(rng: () => number = Math.random): number {
+  const total = PACK_SIZE_WEIGHTS.reduce((a, b) => a + b, 0);
+  let r = rng() * total;
+  for (let i = 0; i < PACK_SIZE_WEIGHTS.length; i++) {
+    r -= PACK_SIZE_WEIGHTS[i]!;
+    if (r < 0) return i + 1;
+  }
+  return PACK_SIZE_WEIGHTS.length;
 }
 
 export interface Pos {
@@ -127,7 +145,9 @@ export class Monsters {
       if (near >= o.maxNearPlayer) continue;
       const spot = this.findSpawn(p, players);
       if (!spot) continue;
-      const m: Monster = { id: this.nextId++, kind: "zombie", ...spot, nextStepAt: now + o.stepMs, lastNearPlayerAt: now };
+      const m: Monster = {
+        id: this.nextId++, kind: "zombie", count: rollPackSize(this.rng), ...spot, nextStepAt: now + o.stepMs, lastNearPlayerAt: now,
+      };
       this.all.set(m.id, m);
       changed.add(m.id);
     }
@@ -156,9 +176,11 @@ export class Monsters {
 
   /** Free for a zombie to stand on; `prey` (the player being chased) is allowed. */
   private canEnter(x: number, y: number, players: Pos[], prey?: Pos): boolean {
+    const tile = this.world.tileAt(x, y);
     return (
       !inSafeZone(x, y) &&
-      isPassable(this.world.tileAt(x, y)) &&
+      isPassable(tile) &&
+      tile !== T.CAMP_ICON && // Zombies leave the camps alone.
       !this.at(x, y) &&
       !players.some((p) => p !== prey && p.x === x && p.y === y)
     );

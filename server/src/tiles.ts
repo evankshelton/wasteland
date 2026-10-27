@@ -47,6 +47,7 @@ export const T = {
   BASE_FLOOR: id("base_floor"),
   BASE_GATE: id("base_gate"),
   BASE_ICON: id("base_icon"),
+  CAMP_ICON: id("camp_icon"),
 } as const;
 
 const passable = new Uint8Array(256);
