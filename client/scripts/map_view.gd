@@ -1,31 +1,55 @@
 extends Control
-## Full-screen world map: every chunk the server has generated so far, drawn at
-## one coloured pixel per tile (scaled by zoom), with the player, other players
-## and zombies in view, and the base and every encampment the player has been inside marked by name.
+## Full-screen world map: every chunk the server has generated so far, drawn in
+## the game's own 16x16 EGA tiles (shaders/pixel_map.gdshader). Each tile on the
+## map stands for a cell of the world - a few tiles across close up, dozens zoomed
+## out - and is drawn at a whole number of screen pixels per art pixel, so the
+## map is crisp pixel art at every zoom. The player, other players and zombies
+## are the game's sprites; the base and every encampment the player has been
+## inside are their icons, named.
 ##
-## Opening it asks the server for the chunk index, then fetches the chunks this
-## client doesn't have yet in batches. Chunk data never changes, so each chunk
-## is only fetched and turned into a texture once per session.
+## Every known tile id goes into one texture the shader reads, grown as more of
+## the world is charted. Opening the map asks the server for the chunk index,
+## then fetches the chunks this client doesn't have yet in batches. Chunk data
+## never changes, so each chunk is only fetched once per session.
 ##
 ## Pan: drag, or the movement keys. Zoom: mouse wheel or map_zoom_in/out.
 ## map_center jumps back to the player; open_map or Esc closes.
 
 const BATCH := 128
-const ZOOMS: Array[float] = [0.25, 0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0] ## screen px per tile
-const DEFAULT_ZOOM := 4
+const ZOOMS: Array[float] = [3.0, 4.0] ## screen px per tile
+const DEFAULT_ZOOM := 1 ## 4 px per tile: a map tile for every 8x8 of the world, at 2x
+const ROADS_FROM_ZOOM := 4.0 ## zoomed out further than this, the map shows no roads at all
 const PAN_SPEED := 700.0 ## screen px per second
-const BACKGROUND := Color(0.02, 0.02, 0.02)
-const GRID_COLOR := Color(1, 1, 1, 0.05)
-const PLAYER_COLOR := Color(1, 1, 0.33)
-const OTHER_COLOR := Color(1.0, 0.6, 0.3)
-const ZOMBIE_COLOR := Color(0.33, 1.0, 0.33)
-const CAMP_COLOR := Color(1.0, 0.85, 0.45)
+const BACKGROUND := Color.BLACK
+const LABEL_COLOR := Color(1.0, 1.0, 0.33) ## EGA yellow
+const OTHER_TINT := Color(1.0, 0.6, 0.3) ## as other players are tinted in the game
+const AVATAR_REGION := Rect2(0, 0, 16, 16) ## sprites.png column 0
+const ZOMBIE_REGION := Rect2(16, 0, 16, 16) ## sprites.png column 1
+const PIXEL_MAP := preload("res://shaders/pixel_map.gdshader")
+const TILES_ART := preload("res://assets/tiles.png")
+const SPRITES_ART := preload("res://assets/sprites.png")
+const ART := 16 ## art pixels per tile
+const UNCHARTED := 255 ## tile id the shader reads as unknown land
+const TILES_MARGIN := 4 ## spare chunks around the charted area, so the tile texture rarely regrows
+## Tiles the map shows as something else: camps are only marked once visited
+## (by _draw_overlay), and the base is drawn there too, so neither is lost to a big cell.
+const SHOW_AS := {"camp_icon": "wasteland", "base_icon": "wasteland"}
+## A cell with a road through it shows road, unless it's one of these.
+const KEEP_OVER_ROAD: Array[String] = ["ruins", "water", "mountains", "rubble"]
 
 var game: Node ## the game.gd scene that owns the chunk data
 var _center := Vector2.ZERO ## world tile position at the middle of the screen
 var _zoom_index := DEFAULT_ZOOM
-var _textures := {} ## Vector2i chunk -> ImageTexture
-var _palette := PackedByteArray() ## tile id * 3 -> r, g, b
+var _pixels: ColorRect ## the map itself, drawn by the shader
+var _overlay: Control ## icons, sprites and names, drawn over the map
+var _tiles_image: Image ## every known tile id, R8; UNCHARTED where unknown
+var _tiles_texture: ImageTexture
+var _tiles_origin := Vector2i.ZERO ## chunk at the image's top-left
+var _tiles_chunks := Vector2i.ZERO ## the image's size, in chunks
+var _charted := {} ## Vector2i chunks already written into the image
+var _icon_of := {} ## tile key -> tile id, for the icons drawn over the map
+var _road_tiles := {} ## Vector2i -> true, every road tile charted
+var _road_masks := {} ## cell size -> ImageTexture counting the road tiles in each cell
 var _queue: Array[Vector2i] = []
 var _total := 0
 var _received := 0
@@ -38,14 +62,36 @@ var _blink := 0.0
 
 func setup(owner_game: Node, tiles: Array) -> void:
 	game = owner_game
-	_palette.resize(tiles.size() * 3)
 	for t: Dictionary in tiles:
-		var c := Color.html(str(t.get("color", "#ff00ff")))
-		var o := int(t.id) * 3
-		if o + 2 < _palette.size():
-			_palette[o] = c.r8
-			_palette[o + 1] = c.g8
-			_palette[o + 2] = c.b8
+		_icon_of[str(t.key)] = int(t.id)
+	var remap := PackedInt32Array()
+	for id in 64:
+		remap.append(id)
+	for key: String in SHOW_AS:
+		if _icon_of.has(key) and _icon_of.has(SHOW_AS[key]):
+			remap[_icon_of[key]] = _icon_of[SHOW_AS[key]]
+	var material := ShaderMaterial.new()
+	material.shader = PIXEL_MAP
+	material.set_shader_parameter("art", TILES_ART)
+	material.set_shader_parameter("remap", remap)
+	material.set_shader_parameter("road_id", _icon_of.get("road", -1))
+	material.set_shader_parameter("plain_id", _icon_of.get("wasteland", 1))
+	var keep := PackedInt32Array()
+	for key in KEEP_OVER_ROAD:
+		keep.append(_icon_of.get(key, -1))
+	material.set_shader_parameter("keep_over_road", keep)
+	_pixels = ColorRect.new()
+	_pixels.material = material
+	_overlay = Control.new()
+	_overlay.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	for layer: Control in [_pixels, _overlay]:
+		layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_pixels)
+	move_child(_pixels, 0)
+	add_child(_overlay)
+	move_child(_overlay, 1)
+	_overlay.draw.connect(_draw_overlay)
 
 
 func open() -> void:
@@ -68,7 +114,15 @@ func _process(delta: float) -> void:
 	if pan != Vector2.ZERO:
 		_center += pan * PAN_SPEED * delta / _zoom()
 		_update_info()
-	queue_redraw()
+	_chart_new_chunks()
+	var material: ShaderMaterial = _pixels.material
+	material.set_shader_parameter("view_origin", _screen_to_world(Vector2.ZERO))
+	material.set_shader_parameter("rect_size", size)
+	material.set_shader_parameter("zoom", _zoom())
+	material.set_shader_parameter("cell", float(_cell()))
+	material.set_shader_parameter("roads", _road_mask(_cell()))
+	material.set_shader_parameter("show_roads", _zoom() >= ROADS_FROM_ZOOM)
+	_overlay.queue_redraw()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -167,79 +221,135 @@ func _world_to_screen(p: Vector2) -> Vector2:
 	return (p - _center) * _zoom() + size / 2
 
 
+## Tiles per map cell at this zoom: a power of two that makes each art pixel a
+## whole number of screen pixels - 2 if it can (chunky, like the game), else 3, else 1.
+func _cell() -> int:
+	for want in [2, 3, 1]:
+		var cell := 1
+		while cell <= 256:
+			if is_equal_approx(_zoom() * cell / ART, want):
+				return cell
+			cell *= 2
+	return maxi(1, int(ART / _zoom()))
+
+
 func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), BACKGROUND)
+
+
+## The base, visited camps, players and zombies, each drawn into the map cell
+## it's in at the map's own scale, like a piece on the game board.
+func _draw_overlay() -> void:
 	if game == null:
 		return
-	var cs: int = game.chunk_size
-	var z := _zoom()
-	var top_left: Vector2i = game.chunk_of(Vector2i(_screen_to_world(Vector2.ZERO).floor()))
-	var bottom_right: Vector2i = game.chunk_of(Vector2i(_screen_to_world(size).floor()))
-	var chunk_px := Vector2(cs, cs) * z
-
-	for cy in range(top_left.y, bottom_right.y + 1):
-		for cx in range(top_left.x, bottom_right.x + 1):
-			var key := Vector2i(cx, cy)
-			var screen_pos := _world_to_screen(Vector2(key * cs))
-			if game.chunks.has(key):
-				draw_texture_rect(_texture_for(key), Rect2(screen_pos, chunk_px), false)
-			elif z >= 1.0:
-				draw_rect(Rect2(screen_pos, chunk_px), GRID_COLOR, false)
-
+	var cell := _cell()
 	var font := get_theme_default_font()
-	var base_pos := _world_to_screen(Vector2(0.5, -9.5))
-	draw_string(font, base_pos + Vector2(-20, -4), "BASE", HORIZONTAL_ALIGNMENT_CENTER, 40, 14, Color.WHITE)
-	for at: Vector2i in game.visited_camps:
-		var p := _world_to_screen(Vector2(at) + Vector2(0.5, 0.5))
-		if not Rect2(Vector2.ZERO, size).grow(200).has_point(p):
-			continue
-		var dot := maxf(z * 0.6, 3.0)
-		draw_circle(p, dot + 1.0, Color.BLACK)
-		draw_circle(p, dot, CAMP_COLOR)
-		var label: String = game.visited_camps[at]
-		draw_string_outline(font, p + Vector2(-100, -dot - 4), label, HORIZONTAL_ALIGNMENT_CENTER, 200, 12, 4, Color.BLACK)
-		draw_string(font, p + Vector2(-100, -dot - 4), label, HORIZONTAL_ALIGNMENT_CENTER, 200, 12, CAMP_COLOR)
+	var screen := Rect2(Vector2.ZERO, size).grow(64)
+	var placed := {} # cell -> true, so only one thing is drawn in each
 
-	var marker := maxf(z, 7.0)
-	for id: int in game.other_positions:
-		var p := _world_to_screen(Vector2(game.other_positions[id]) + Vector2(0.5, 0.5))
-		draw_circle(p, marker * 0.5 + 1.0, Color.BLACK)
-		draw_circle(p, marker * 0.5, OTHER_COLOR)
+	_draw_in_cell(TILES_ART, Rect2(_icon_of.get("base_icon", 0) * ART, 0, ART, ART), Vector2i.ZERO, Color.WHITE)
+	_label(font, Vector2i.ZERO, "BASE")
+	for at: Vector2i in game.visited_camps:
+		if screen.has_point(_world_to_screen(Vector2(at))):
+			_draw_in_cell(TILES_ART, Rect2(_icon_of.get("camp_icon", 0) * ART, 0, ART, ART), at, Color.WHITE)
+			_label(font, at, game.visited_camps[at])
+			placed[_cell_of(at)] = true
 
 	for id: int in game.monster_positions:
-		var p := _world_to_screen(Vector2(game.monster_positions[id]) + Vector2(0.5, 0.5))
-		draw_rect(Rect2(p - Vector2(marker, marker) * 0.35, Vector2(marker, marker) * 0.7).grow(1.0), Color.BLACK)
-		draw_rect(Rect2(p - Vector2(marker, marker) * 0.35, Vector2(marker, marker) * 0.7), ZOMBIE_COLOR)
-
-	# The player: a blinking square with crosshairs so it's findable when zoomed out.
-	var me := _world_to_screen(Vector2(game.overworld_pos()) + Vector2(0.5, 0.5))
-	var color := PLAYER_COLOR if _blink < 0.6 else Color.WHITE
-	for arm: Vector2 in [Vector2.LEFT, Vector2.RIGHT, Vector2.UP, Vector2.DOWN]:
-		draw_line(me + arm * marker, me + arm * marker * 2.5, Color.BLACK, 4.0)
-		draw_line(me + arm * marker, me + arm * marker * 2.5, color, 2.0)
-	var box := Rect2(me - Vector2(marker, marker) * 0.5, Vector2(marker, marker))
-	draw_rect(box.grow(1.0), Color.BLACK)
-	draw_rect(box, color)
+		var at: Vector2i = game.monster_positions[id]
+		if not placed.has(_cell_of(at)):
+			_draw_in_cell(SPRITES_ART, ZOMBIE_REGION, at, Color.WHITE)
+	for id: int in game.other_positions:
+		_draw_in_cell(SPRITES_ART, AVATAR_REGION, game.other_positions[id], OTHER_TINT)
+	# The player blinks, as the cursor did on old maps, so they're easy to find.
+	if _blink < 0.65:
+		_draw_in_cell(SPRITES_ART, AVATAR_REGION, game.overworld_pos(), Color.WHITE)
+	else:
+		var r := _cell_rect(game.overworld_pos())
+		_overlay.draw_rect(r, LABEL_COLOR, false, maxf(2.0, r.size.x / ART))
 
 
-func _texture_for(key: Vector2i) -> ImageTexture:
-	var tex: ImageTexture = _textures.get(key)
-	if tex:
-		return tex
-	var data: PackedByteArray = game.chunks[key]
-	var rgb := PackedByteArray()
-	rgb.resize(data.size() * 3)
-	for i in data.size():
-		var o := data[i] * 3
-		if o + 2 >= _palette.size():
-			continue # Unknown tile id: leave black.
-		rgb[i * 3] = _palette[o]
-		rgb[i * 3 + 1] = _palette[o + 1]
-		rgb[i * 3 + 2] = _palette[o + 2]
+func _cell_of(at: Vector2i) -> Vector2i:
+	var cell := _cell()
+	return Vector2i(floori(at.x / float(cell)), floori(at.y / float(cell)))
+
+
+## The screen rect of the map cell holding world tile `at`.
+func _cell_rect(at: Vector2i) -> Rect2:
+	var cell := _cell()
+	var top_left := _world_to_screen(Vector2(_cell_of(at) * cell))
+	return Rect2(top_left, Vector2.ONE * cell * _zoom())
+
+
+func _draw_in_cell(texture: Texture2D, region: Rect2, at: Vector2i, tint: Color) -> void:
+	var r := _cell_rect(at)
+	if Rect2(Vector2.ZERO, size).intersects(r):
+		_overlay.draw_texture_rect_region(texture, r, region, tint)
+
+
+## A name over a map cell, in EGA yellow with a black outline.
+func _label(font: Font, at: Vector2i, text: String) -> void:
+	var r := _cell_rect(at)
+	var p := Vector2(r.get_center().x - 150, r.position.y - 4)
+	_overlay.draw_string_outline(font, p, text, HORIZONTAL_ALIGNMENT_CENTER, 300, 14, 4, Color.BLACK)
+	_overlay.draw_string(font, p, text, HORIZONTAL_ALIGNMENT_CENTER, 300, 14, LABEL_COLOR)
+
+
+## How many road tiles each cell of this size holds, as a texture over the same area as the tiles.
+func _road_mask(cell: int) -> ImageTexture:
+	if _road_masks.has(cell) or _tiles_image == null:
+		return _road_masks.get(cell)
+	var origin := Vector2i((Vector2(_tiles_origin * int(game.chunk_size)) / cell).floor()) # the cell holding the tiles' corner
+	var size_cells := Vector2i((Vector2(_tiles_image.get_size()) / cell).ceil()) + Vector2i.ONE
+	var image := Image.create_empty(size_cells.x, size_cells.y, false, Image.FORMAT_R8)
+	for t: Vector2i in _road_tiles:
+		var px := Vector2i((Vector2(t) / cell).floor()) - origin
+		image.set_pixelv(px, Color8(mini(255, image.get_pixelv(px).r8 + 1), 0, 0))
+	_road_masks[cell] = ImageTexture.create_from_image(image)
+	return _road_masks[cell]
+
+
+## Write any chunks that arrived since last frame into the tile texture,
+## regrowing it (with a margin) when the charted area outgrows it.
+func _chart_new_chunks() -> void:
+	if _charted.size() == game.chunks.size():
+		return
+	var lo := Vector2i(1 << 30, 1 << 30)
+	var hi := -lo
+	for key: Vector2i in game.chunks:
+		lo = Vector2i(mini(lo.x, key.x), mini(lo.y, key.y))
+		hi = Vector2i(maxi(hi.x, key.x), maxi(hi.y, key.y))
 	var cs: int = game.chunk_size
-	tex = ImageTexture.create_from_image(Image.create_from_data(cs, cs, false, Image.FORMAT_RGB8, rgb))
-	_textures[key] = tex
-	return tex
+	var fits := _tiles_image != null and Rect2i(_tiles_origin, _tiles_chunks).encloses(Rect2i(lo, hi - lo + Vector2i.ONE))
+	if not fits:
+		_tiles_origin = lo - Vector2i(TILES_MARGIN, TILES_MARGIN)
+		_tiles_chunks = hi - lo + Vector2i.ONE * (1 + TILES_MARGIN * 2)
+		_tiles_image = Image.create_empty(_tiles_chunks.x * cs, _tiles_chunks.y * cs, false, Image.FORMAT_R8)
+		_tiles_image.fill(Color8(UNCHARTED, 0, 0))
+		_charted.clear()
+		_road_masks.clear()
+	for key: Vector2i in game.chunks:
+		if _charted.has(key):
+			continue
+		var data: PackedByteArray = game.chunks[key]
+		var chunk := Image.create_from_data(cs, cs, false, Image.FORMAT_R8, data)
+		_tiles_image.blit_rect(chunk, Rect2i(0, 0, cs, cs), (key - _tiles_origin) * cs)
+		_charted[key] = true
+		var road: int = _icon_of.get("road", -1)
+		if data.count(road) > 0:
+			for i in data.size():
+				if data[i] == road:
+					@warning_ignore("integer_division")
+					_road_tiles[key * cs + Vector2i(i % cs, i / cs)] = true
+			_road_masks.clear()
+	if fits:
+		_tiles_texture.update(_tiles_image)
+	else:
+		_tiles_texture = ImageTexture.create_from_image(_tiles_image)
+		var material: ShaderMaterial = _pixels.material
+		material.set_shader_parameter("tiles", _tiles_texture)
+		material.set_shader_parameter("tiles_origin", Vector2(_tiles_origin * cs))
+		material.set_shader_parameter("tiles_size", Vector2(_tiles_image.get_size()))
 
 
 func _update_info() -> void:

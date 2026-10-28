@@ -39,7 +39,11 @@ the overworld tile on that side of the icon. Inside, press E (or walk into
 someone) to talk to the NPC next to you or across a counter.
 
 Press **M** for the world map: every part of the world any player has explored,
-one pixel per tile. Scroll by dragging or with the movement keys, zoom with
+drawn in the game's own 16x16 EGA tiles at a crisp 2x or 3x. Each map tile
+stands for a block of the world, showing its most common terrain. There are
+two zooms: 4x (the default; a map tile per 8x8 of the world, with the
+highways drawn unbroken) and 3x (a map tile per 16x16, with no roads at all). The base, camps you've been inside, players and zombies are the
+game's own icons and sprites (`client/shaders/pixel_map.gdshader`). Scroll by dragging or with the movement keys, zoom with
 the mouse wheel or `+`/`-`, press **C** to jump back to yourself, and M or Esc
 to close it.
 
