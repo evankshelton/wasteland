@@ -39,7 +39,14 @@ the overworld tile on that side of the icon. Inside, press E (or walk into
 someone) to talk to the NPC next to you or across a counter.
 
 Press **M** for the world map: every part of the world any player has explored,
-one pixel per tile. Scroll by dragging or with the movement keys, zoom with
+drawn as a black-and-white, hand-inked chart. Mountains are shaded peaks,
+forests clumps of round trees, lakes smooth curving shorelines with wave
+strokes, and highways dashed strokes showing roughly where they run. Each
+cluster of ruins is drawn as one old-map town (houses, towers and a keep, with
+a wall and turrets round the big ones) rather than tile by tile. Symbols stay
+about the same size on screen at any zoom (`client/shaders/ink_map.gdshader`;
+roads and towns are worked out in `client/scripts/map_view.gd`).
+Scroll by dragging or with the movement keys, zoom with
 the mouse wheel or `+`/`-`, press **C** to jump back to yourself, and M or Esc
 to close it.
 
