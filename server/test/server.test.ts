@@ -7,8 +7,9 @@ import { after, test } from "node:test";
 import { WebSocket } from "ws";
 import { BaseMap } from "../src/base.ts";
 import { BOOTH_TYPES, CAMP_MIN_BASE_DISTANCE, CAMP_STYLES, campLayout, checkLayout } from "../src/camps.ts";
+import { DUNGEON_LEGEND, DUNGEON_MIN_BASE_DISTANCE, checkDungeon, dungeonDepth, dungeonLayout } from "../src/dungeons.ts";
 import { XP, gainXp, raise, rollCharacter, xpForLevel } from "../src/character.ts";
-import { DEFAULT_MONSTER_OPTIONS, Monsters, inSafeZone, rollPackSize, type MonsterOptions } from "../src/monsters.ts";
+import { DEFAULT_MONSTER_OPTIONS, DUNGEON_MONSTER_OPTIONS, Monsters, dungeonGround, inSafeZone, rollPackSize, type MonsterOptions } from "../src/monsters.ts";
 import { GameServer } from "../src/server.ts";
 import { Storage } from "../src/storage.ts";
 import { isPassable, T } from "../src/tiles.ts";
@@ -19,7 +20,7 @@ const dir = mkdtempSync(join(tmpdir(), "wasteland-test-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 const BASE_MAP = BaseMap.load();
-const V = 8; // protocol version
+const V = 10; // protocol version
 let nextPort = 17777 + Math.floor(Math.random() * 1000);
 
 async function boot(dbPath: string, monsters: Partial<MonsterOptions> = {}) {
@@ -678,6 +679,177 @@ test("players enter an encampment from its icon and leave by walking off its edg
   c.send({ t: "map" });
   const index = await c.until("map_index");
   assert.ok(index.camps.some((k: any) => k.id === camp.id && k.name === camp.name));
+  await c.close();
+  await stop();
+});
+
+// ---- dungeons ----
+
+test("every dungeon level is a walled-in labyrinth of rooms, doors and passages, all reachable", () => {
+  const shapes = new Set<string>();
+  const depths = new Set<number>();
+  for (let i = 0; i < 200; i++) {
+    const seed = 5000 + i * 41;
+    const depth = dungeonDepth(seed);
+    depths.add(depth);
+    const level = 1 + (i % depth);
+    const def = dungeonLayout(seed, `Dungeon ${i}`, level, depth);
+    assert.ok(checkDungeon(def), `layout ${i} is playable`);
+    const site = new BaseMap(def, { x: 0, y: 0 }); // throws on a bad entry
+    const text = def.map.join("\n");
+    assert.ok(def.rooms.length >= 5, "several rooms");
+    assert.ok((text.match(/\+/g) ?? []).length >= def.rooms.length, "doors into every room");
+    const at = (q: { x: number; y: number }) => site.tiles[q.y * site.width + q.x]!;
+    // The first level has the ladder you came down, the others stairs back up; every level but the last has
+    // stairs down; the last has stairs out.
+    const ways = [...site.exits.map(at), ...site.down.map(at), ...site.up.map(at)].sort();
+    const want = [level === 1 ? T.LADDER : T.STAIRS_UP, level < depth ? T.STAIRS_DOWN : T.STAIRS_OUT].sort();
+    assert.deepEqual(ways, want, `level ${level} of ${depth} has the right ways up, down and out`);
+    // Passages: open tiles outside every room.
+    const inRoom = (x: number, y: number) => site.rooms.some((r) => x >= r.x && y >= r.y && x < r.x + r.w && y < r.y + r.h);
+    let passage = 0;
+    for (let y = 0; y < site.height; y++) for (let x = 0; x < site.width; x++) if (site.walkable(x, y) && !inRoom(x, y)) passage++;
+    assert.ok(passage > 40, `winding passages between the rooms (${passage} tiles)`);
+    shapes.add(text);
+  }
+  assert.equal(shapes.size, 200, "every dungeon is different");
+  assert.deepEqual([...depths].sort(), [2, 3, 4], "dungeons are 2 to 4 levels deep");
+  assert.deepEqual(dungeonLayout(9, "Same", 2), dungeonLayout(9, "Same", 2), "a level's layout comes from the seed and level");
+  assert.notDeepEqual(dungeonLayout(9, "Same", 1).map, dungeonLayout(9, "Same", 2).map, "each level is different");
+});
+
+test("dungeon entrances are dug into new land away from the base", () => {
+  const storage = new Storage(join(dir, "dungeons.db"));
+  const world = new World(storage, 4242);
+  let found = 0;
+  for (let cy = -6; cy <= 6; cy++) {
+    for (let cx = -6; cx <= 6; cx++) {
+      const tiles = world.chunk(cx, cy);
+      tiles.forEach((t, i) => {
+        if (t !== T.DUNGEON_ICON) return;
+        const x = cx * CHUNK_SIZE + (i % CHUNK_SIZE);
+        const y = cy * CHUNK_SIZE + Math.floor(i / CHUNK_SIZE);
+        const d = storage.dungeonAt(x, y);
+        assert.ok(d, `the entrance at (${x}, ${y}) is on record`);
+        assert.ok(Math.hypot(x, y) >= DUNGEON_MIN_BASE_DISTANCE, "clear of the base");
+        found++;
+      });
+    }
+  }
+  assert.ok(found >= 2, `found ${found} dungeons`);
+  storage.close();
+});
+
+test("dungeon zombies find their way through the passages to you", () => {
+  // Passages looping round: straight at the player is a wall, so they have to go round.
+  const site = new BaseMap({
+    name: "U", legend: DUNGEON_LEGEND, entry: [13, 5], respawn: [13, 5], rooms: [], npcs: [], exits: [[12, 5]], down: [], up: [],
+    map: [
+      "###############",
+      "#.........#####",
+      "#.#######.#####",
+      "#.#.....#.#####",
+      "#.#.###.#.#####",
+      "#...#.#...##L.#",
+      "###############",
+    ],
+  });
+  const mobs = new Monsters(dungeonGround(site), { ...DEFAULT_MONSTER_OPTIONS, ...DUNGEON_MONSTER_OPTIONS, spawnChance: 0 });
+  addZombie(mobs, 1, 9, 5);
+  const player = { id: 1, x: 3, y: 5, targetable: true }; // just the other side of the wall at (4, 5)
+  let contact = false;
+  for (let t = 1; t < 60 && !contact; t++) contact = mobs.tick(t * 1000, [player]).contacts.length > 0;
+  assert.ok(contact, "the zombie came round the long way and reached the player");
+});
+
+test("players go down into a dungeon, fight what's there, and climb back out", { timeout: 20_000 }, async () => {
+  const { port, server, stop } = await boot(join(dir, "dungeon-walk.db"));
+  const { c } = await walkOut(port, "Delver");
+  const srv = server as any;
+  for (let cy = -6; cy <= 6; cy++) for (let cx = -6; cx <= 6; cx++) srv.world.chunk(cx, cy);
+  let hole: { x: number; y: number } | undefined;
+  for (let cy = -6; cy <= 6 && !hole; cy++) {
+    for (let cx = -6; cx <= 6 && !hole; cx++) {
+      const i = srv.world.chunk(cx, cy).indexOf(T.DUNGEON_ICON);
+      if (i >= 0) hole = { x: cx * CHUNK_SIZE + (i % CHUNK_SIZE), y: cy * CHUNK_SIZE + Math.floor(i / CHUNK_SIZE) };
+    }
+  }
+  const d = srv.storage.dungeonAt(hole!.x, hole!.y);
+  const p = onlyPlayer(server);
+  [p.x, p.y] = [d.x, d.y];
+  c.send({ t: "enter" });
+  const loc = await c.until("location");
+  const depth = dungeonDepth(d.seed);
+  assert.deepEqual([loc.kind, loc.site, loc.name, loc.icon], ["dungeon", `dungeon:${d.id}:1`, `${d.name}, Level 1 of ${depth}`, { x: d.x, y: d.y }]);
+  const site = new BaseMap(dungeonLayout(d.seed, d.name, 1, depth), d);
+  assert.deepEqual([loc.x, loc.y], [site.entry.x, site.entry.y], "arrived by the ladder");
+
+  // A zombie in the next tile along: walking into it starts a fight down here.
+  const mobs: Monsters = srv.mobsFor(`dungeon:${d.id}:1`);
+  const dirs = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] } as const;
+  const [way, [dx, dy]] = Object.entries(dirs).find(([, [x, y]]) => site.walkable(site.entry.x + x, site.entry.y + y) && !site.isExit(site.entry.x + x, site.entry.y + y))!;
+  addZombie(mobs, 9001, site.entry.x + dx, site.entry.y + dy, Date.now() + 60_000, 3);
+  await c.move(way);
+  const start = await c.until("encounter_start");
+  assert.deepEqual([start.x, start.y], [site.entry.x + dx, site.entry.y + dy], "the fight is where we stand in the dungeon");
+  assert.equal(start.enemies[0].count, 3);
+  c.send({ t: "encounter_end", id: start.id, result: "victory", killed: [9001] });
+  const over = await c.until("encounter_over");
+  assert.equal(p.loc, `dungeon:${d.id}:1`, "still down in the dungeon after the fight");
+  assert.deepEqual([over.x, over.y], [p.bx, p.by]);
+
+  // Back to the ladder and up it.
+  await new Promise((r) => setTimeout(r, 350));
+  const back = Object.entries(dirs).find(([, [x, y]]) => x === -dx && y === -dy)![0];
+  await c.move(back);
+  const ladder = site.exits[0]!;
+  const toLadder = Object.entries(dirs).find(([, [x, y]]) => p.bx + x === ladder.x && p.by + y === ladder.y)![0];
+  await c.move(toLadder);
+  const out = await c.until("location");
+  assert.equal(out.kind, "overworld");
+  assert.ok(Math.abs(out.x - d.x) + Math.abs(out.y - d.y) <= 1, "out beside the entrance");
+
+  // Back down, then stairs after stairs to the bottom, and out of the far end.
+  [p.x, p.y] = [d.x, d.y];
+  c.send({ t: "enter" });
+  await c.until("location");
+  for (let level = 1; level <= depth; level++) {
+    const here = srv.siteOf(p.loc) as BaseMap;
+    const way = level < depth ? here.down[0]! : here.exits[here.exits.length - 1]!;
+    const [step, [sx, sy]] = Object.entries(dirs).find(([, [x, y]]) => here.walkable(way.x - x, way.y - y))!;
+    [p.bx, p.by] = [way.x - sx, way.y - sy]; // stand next to the stairs
+    await c.move(step);
+    const next = await c.until("location");
+    if (level < depth) {
+      assert.deepEqual([next.kind, next.site, next.name], ["dungeon", `dungeon:${d.id}:${level + 1}`, `${d.name}, Level ${level + 1} of ${depth}`]);
+      const below = srv.siteOf(next.site) as BaseMap;
+      assert.deepEqual([next.x, next.y], [below.entry.x, below.entry.y], "down the stairs to the landing below");
+    } else {
+      assert.equal(next.kind, "overworld", "the stairs at the bottom lead out of the dungeon");
+      assert.ok(Math.abs(next.x - d.x) + Math.abs(next.y - d.y) <= 1, "out beside the entrance");
+    }
+  }
+
+  // Down a level, back up the stairs, and out by the ladder: the way you came.
+  [p.x, p.y] = [d.x, d.y];
+  c.send({ t: "enter" });
+  await c.until("location");
+  const stepOnto = async (way: { x: number; y: number }) => {
+    const here = srv.siteOf(p.loc) as BaseMap;
+    const [step, [sx, sy]] = Object.entries(dirs).find(([, [x, y]]) => here.walkable(way.x - x, way.y - y))!;
+    [p.bx, p.by] = [way.x - sx, way.y - sy];
+    await c.move(step);
+    return c.until("location");
+  };
+  const top = srv.siteOf(p.loc) as BaseMap;
+  await stepOnto(top.down[0]!);
+  const second = srv.siteOf(p.loc) as BaseMap;
+  assert.equal(second.up.length, 1, "stairs back up on level 2");
+  const up = await stepOnto(second.up[0]!);
+  assert.equal(up.site, `dungeon:${d.id}:1`, "up the stairs to level 1");
+  assert.ok(Math.abs(up.x - top.down[0]!.x) + Math.abs(up.y - top.down[0]!.y) === 1, "arrived beside the stairs down");
+  const out2 = await stepOnto(top.exits[0]!);
+  assert.equal(out2.kind, "overworld", "and out by the ladder");
   await c.close();
   await stop();
 });

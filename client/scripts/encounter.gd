@@ -8,8 +8,9 @@ extends Node3D
 ## blend into each other along meandering borders rather than meeting in
 ## squares (see shaders/terrain.gdshader).
 ##
-## Fog closes in a few metres out and fades everything to black by 18 m, with
-## no horizon (encounter.tscn's environment), plus sooty fog banks and dust
+## A dusty daytime haze thickens with distance until, by about 40 m, there's
+## nothing but haze and no horizon (encounter.tscn's environment), so zombies
+## loom out of it as they close in; plus fog banks and dust
 ## drifting around the player (_build_atmosphere). Each zombie on the overworld
 ## is a pack of 1-15 here, scattered around where it stood.
 ##
@@ -33,6 +34,7 @@ const GROUND_FOR := {
 	"water": ["mud", 0.35], "swamp": ["mud", 0.4], "dunes": ["ash", 0.95], "base_wall": ["concrete", 0.85],
 	"base_floor": ["concrete", 0.85], "base_gate": ["concrete", 0.85], "base_icon": ["concrete", 0.85],
 	"concrete": ["concrete", 0.85], "camp_icon": ["dirt", 0.95],
+	"cave_wall": ["rock", 0.9], "cave_floor": ["gravel", 0.95], "door": ["concrete", 0.9], "ladder": ["concrete", 0.9],
 }
 const GROUND_TEXTURE_METRES := 4.0 ## one repeat of a ground texture
 const GROUND_MARGIN := 48.0 ## metres of terrain beyond the arena's edge, towards the horizon
@@ -45,6 +47,7 @@ const RELIEF := {
 	"road": [0.0, 0.25], "ruins": [0.0, 0.35], "rubble": [0.0, 0.7], "base_icon": [0.0, 0.2],
 	"base_wall": [0.0, 0.2], "base_floor": [0.0, 0.2], "base_gate": [0.0, 0.2], "concrete": [0.0, 0.2],
 	"camp_icon": [0.0, 0.3],
+	"cave_wall": [0.0, 0.1], "cave_floor": [0.0, 0.15], "door": [0.0, 0.1], "ladder": [0.0, 0.1],
 }
 const BLOCK_TEXTURE_SIZE := 6.0 ## metres per repeat of the rock and concrete textures on blocks
 const CLEAR_RADIUS := 3.0 ## metres kept free of trees and debris around where anyone starts
@@ -75,9 +78,12 @@ const LAYER_PLAYER := 2
 const LAYER_ENEMIES := 4
 
 ## Terrain keys whose cells get a solid block.
-const SOLID := ["mountains", "ruins", "base_wall", "water"]
+const SOLID := ["mountains", "ruins", "base_wall", "water", "cave_wall"]
+const CEILING := 7.0 ## metres to a dungeon's rock ceiling
+const DUNGEON_DARK := Color(0.025, 0.022, 0.02) ## what a dungeon's passages fade into past the torchlight
 
 var radius := 8
+var underground := false ## fighting in a dungeon: rock walls and ceiling, dark, by torchlight
 var half_extent := 34.0 ## radius of the ring at the arena's edge; crossing it means fleeing
 var max_health := 10.0
 var health := 10.0
@@ -145,14 +151,19 @@ func setup(game: Node, msg: Dictionary) -> void:
 	radius = int(msg.radius)
 	half_extent = (radius + 0.5) * CELL
 	_rng.seed = int(msg.seed)
+	var rock := 1
 	for t: Dictionary in Net.welcome.tiles:
 		_keys[int(t.id)] = str(t.key)
+		if str(t.key) == "cave_wall":
+			rock = int(t.id)
+	underground = game.location == "dungeon"
 	var center := Vector2i(int(msg.x), int(msg.y))
 	for dy in range(-radius, radius + 1):
 		for dx in range(-radius, radius + 1):
 			var id: int = game.tile_at(center + Vector2i(dx, dy))
 			if id < 0:
-				id = 1 # Not streamed to us yet: call it wasteland.
+				# Off the map: solid rock underground; up top, land not streamed to us yet, so call it wasteland.
+				id = rock if underground else 1
 			_ids[Vector2i(dx, dy)] = id
 			_cells[Vector2i(dx, dy)] = _keys.get(id, "wasteland")
 			_relief[Vector2i(dx, dy)] = RELIEF.get(_cells[Vector2i(dx, dy)], [0.0, 1.0])
@@ -192,7 +203,8 @@ func setup(game: Node, msg: Dictionary) -> void:
 			if member > 0:
 				for attempt in 12:
 					flat = Vector2(at.x, at.z) + Vector2.from_angle(_rng.randf() * TAU) * sqrt(_rng.randf()) * reach
-					if members.all(func(m: Vector2) -> bool: return m.distance_to(flat) >= PACK_SPACING):
+					var open: bool = _cells.get(_cell_at(Vector3(flat.x, 0, flat.y)), "wasteland") not in SOLID
+					if open and members.all(func(m: Vector2) -> bool: return m.distance_to(flat) >= PACK_SPACING):
 						break
 			if flat.length() > inside:
 				flat = flat.normalized() * inside
@@ -209,6 +221,8 @@ func setup(game: Node, msg: Dictionary) -> void:
 	_flush_batches()
 	_build_gun()
 	_build_atmosphere()
+	if underground:
+		_go_underground()
 
 	for s in spawns:
 		_spawn_zombie(s[0], s[1], s[2])
@@ -221,6 +235,31 @@ func setup(game: Node, msg: Dictionary) -> void:
 func _ready() -> void:
 	sun.rotation_degrees = Vector3(-38, 35, 0)
 	banner.hide()
+
+
+## A dungeon fight: no sky or sun, a rock ceiling overhead, and only the
+## torch you carry to see by, so the passages fade into darkness a few
+## tens of metres off and zombies come at you out of the black.
+func _go_underground() -> void:
+	var world_env: WorldEnvironment = $Environment
+	var env: Environment = world_env.environment.duplicate()
+	env.background_color = DUNGEON_DARK
+	env.fog_light_color = DUNGEON_DARK
+	env.fog_depth_begin = 2.0
+	env.fog_depth_end = 30.0
+	env.ambient_light_energy = 0.2
+	world_env.environment = env
+	sun.visible = false
+	var torch := OmniLight3D.new()
+	torch.light_color = Color(1.0, 0.75, 0.45)
+	torch.light_energy = 2.4
+	torch.omni_range = 28.0
+	torch.omni_attenuation = 1.1
+	torch.shadow_enabled = true
+	torch.position = Vector3(0.35, -0.25, -0.3)
+	camera.add_child(torch)
+	var span := (half_extent + GROUND_MARGIN) * 2.0
+	_add_box(Vector3(0, CEILING + 1.0, 0), Vector3(span, 2.0, span), _block_material("rock", Color(0.45, 0.42, 0.38)))
 
 
 # ---- arena construction ----
@@ -455,6 +494,10 @@ func _build_cells() -> void:
 					var stub := _rng.randf_range(1.5, 5.0)
 					var reach := CELL * 0.3
 					_add_box(Vector3(c.x + _rng.randf_range(-reach, reach), ground + h + stub / 2, c.z + _rng.randf_range(-reach, reach)), Vector3(CELL * 0.3, stub, CELL * 0.3), _block_material("concrete", Color(0.75, 0.73, 0.7)))
+			"cave_wall":
+				# Living rock, right up into the ceiling.
+				var h := CEILING + 1.0 - ground
+				_add_box(Vector3(c.x, ground + h / 2, c.z), Vector3(CELL, h, CELL), _block_material("rock", Color(0.7, 0.66, 0.6)))
 			"base_wall":
 				var h := 5.0 + top - ground
 				_add_box(Vector3(c.x, ground + h / 2, c.z), Vector3(CELL, h, CELL), _block_material("concrete", Color.WHITE))
@@ -571,11 +614,12 @@ func _build_boundary() -> void:
 
 
 ## Atmosphere around the player, on top of the environment's distance fog:
-## big soft fog banks drifting through 4-22 m away, and fine dust and ash
+## big soft fog banks drifting through 6-30 m away, and fine dust and ash
 ## floating in the air close by. Both emitters ride along with the player, but
 ## their particles stay where they were blown, so you walk through the haze.
 func _build_atmosphere() -> void:
-	var fog_colour := Color(0.04, 0.035, 0.03) # Sooty: the distance fades to black.
+	# The same dusty haze the distance fades into (or underground, the dark).
+	var fog_colour := Color(0.5, 0.47, 0.42) if not underground else Color(0.12, 0.11, 0.1)
 
 	var banks := CPUParticles3D.new()
 	banks.amount = 45
@@ -584,8 +628,8 @@ func _build_atmosphere() -> void:
 	banks.local_coords = false
 	banks.emission_shape = CPUParticles3D.EMISSION_SHAPE_RING
 	banks.emission_ring_axis = Vector3.UP
-	banks.emission_ring_radius = 22.0
-	banks.emission_ring_inner_radius = 4.0
+	banks.emission_ring_radius = 30.0
+	banks.emission_ring_inner_radius = 6.0
 	banks.emission_ring_height = 3.0
 	banks.position = Vector3(0, 2.5, 0)
 	banks.direction = WIND.normalized()

@@ -3,6 +3,7 @@
 import { randomInt } from "node:crypto";
 import type { Storage } from "./storage.ts";
 import { campName, campSeed, campSpot } from "./camps.ts";
+import { dungeonName, dungeonSeed, dungeonSpot } from "./dungeons.ts";
 import { T } from "./tiles.ts";
 import { CHUNK_SIZE, WORLD_VERSION, generateChunk } from "./worldgen.ts";
 
@@ -63,8 +64,12 @@ export class World {
       // Now and then, new land holds an encampment.
       const spot = campSpot(this.seed, cx, cy, tiles);
       if (spot) tiles[spot.ly * CHUNK_SIZE + spot.lx] = T.CAMP_ICON;
+      // ...or the way down into a dungeon.
+      const hole = dungeonSpot(this.seed, cx, cy, tiles, spot);
+      if (hole) tiles[hole.ly * CHUNK_SIZE + hole.lx] = T.DUNGEON_ICON;
       this.storage.putChunk(cx, cy, tiles);
       if (spot) this.foundCamp(cx * CHUNK_SIZE + spot.lx, cy * CHUNK_SIZE + spot.ly);
+      if (hole) this.foundDungeon(cx * CHUNK_SIZE + hole.lx, cy * CHUNK_SIZE + hole.ly);
     }
     this.cache.set(key, tiles);
     return tiles;
@@ -77,6 +82,11 @@ export class World {
     while (this.storage.campNameTaken(name)) name = campName(this.seed, x, y, ++attempt);
     const camp = this.storage.createCamp(x, y, name, campSeed(this.seed, x, y));
     console.log(`[world] founded ${camp.name} at (${x}, ${y})`);
+  }
+
+  private foundDungeon(x: number, y: number): void {
+    const d = this.storage.createDungeon(x, y, dungeonName(this.seed, x, y), dungeonSeed(this.seed, x, y));
+    console.log(`[world] dug ${d.name} at (${x}, ${y})`);
   }
 
   /** Like chunk(), but never generates: undefined if nobody has been near it yet. */

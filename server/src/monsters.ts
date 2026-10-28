@@ -1,11 +1,56 @@
-// Radioactive zombies: spawned out in the wasteland around players, they
-// shamble one tile at a time towards the nearest player. Stepping onto a
-// player's tile is a "contact", which the game server turns into an
-// encounter. They never enter the base. Zombies are transient: they despawn
-// when nobody is around and are not persisted across server restarts.
+// Radioactive zombies: spawned around players out in the wasteland or down in
+// a dungeon, they shamble one tile at a time towards the nearest player.
+// Stepping onto a player's tile is a "contact", which the game server turns
+// into an encounter. They never enter the base. Zombies are transient: they
+// despawn when nobody is around and are not persisted across server restarts.
+//
+// A Monsters is one map's zombies; what they can walk on, where they may
+// appear, and how they find their way comes from its Ground (the overworld's,
+// or a dungeon's, where they path through the passages rather than shamble).
+import type { BaseMap } from "./base.ts";
 import { T, isPassable } from "./tiles.ts";
 import type { World } from "./world.ts";
 import { BASE } from "./worldgen.ts";
+
+/** A map zombies can roam. */
+export interface Ground {
+  /** A zombie may stand here (other zombies and players aside). */
+  open(x: number, y: number): boolean;
+  /** No zombies appear here, or around a player standing here. */
+  quiet(x: number, y: number): boolean;
+  /** Zombies would rather appear here. */
+  favoured(x: number, y: number): boolean;
+  /** Find a real path to the player through the walls, rather than shambling straight at them. */
+  pathfind: boolean;
+}
+
+/** The wasteland: anything passable, but not by the base or onto a camp or dungeon entrance. */
+export function overworldGround(world: World): Ground {
+  return {
+    open(x, y) {
+      const tile = world.tileAt(x, y);
+      return !inSafeZone(x, y) && isPassable(tile) && tile !== T.CAMP_ICON && tile !== T.DUNGEON_ICON;
+    },
+    quiet: (x, y) => Math.hypot(x, y) < BASE.clearRadius,
+    favoured: (x, y) => world.tileAt(x, y) === T.RADIATION,
+    pathfind: false,
+  };
+}
+
+/**
+ * A dungeon level's passages and rooms, except right where you arrive and by
+ * the stairs and ways out (somewhere to catch your breath).
+ */
+export function dungeonGround(site: BaseMap): Ground {
+  const havens = [site.entry, ...site.exits, ...site.down, ...site.up];
+  const nearHaven = (x: number, y: number, r: number) => havens.some((e) => cheb(e, { x, y }) <= r);
+  return {
+    open: (x, y) => site.walkable(x, y) && !site.isExit(x, y) && !site.isDown(x, y) && !site.isUp(x, y) && !nearHaven(x, y, 2),
+    quiet: (x, y) => nearHaven(x, y, 5),
+    favoured: () => false,
+    pathfind: true,
+  };
+}
 
 export type MonsterKind = "zombie";
 
@@ -62,7 +107,14 @@ export interface MonsterOptions {
   /** A zombie with no player within despawnTiles for despawnAfterMs is removed. */
   despawnTiles: number;
   despawnAfterMs: number;
+  /** Packs are never bigger than this. */
+  maxPack: number;
 }
+
+/** Dungeon zombies: they appear closer (it's dark and the passages are short) and in smaller packs. */
+export const DUNGEON_MONSTER_OPTIONS: Partial<MonsterOptions> = {
+  spawnChance: 0.05, maxNearPlayer: 3, spawnMinTiles: 7, spawnMaxTiles: 13, aggroTiles: 14, maxPack: 6,
+};
 
 export const DEFAULT_MONSTER_OPTIONS: MonsterOptions = {
   stepMs: 900,
@@ -73,6 +125,7 @@ export const DEFAULT_MONSTER_OPTIONS: MonsterOptions = {
   spawnMaxTiles: 18,
   despawnTiles: 48,
   despawnAfterMs: 20_000,
+  maxPack: 15,
 };
 
 export interface Contact {
@@ -89,13 +142,15 @@ export function inSafeZone(x: number, y: number): boolean {
 
 export class Monsters {
   readonly all = new Map<number, Monster>();
-  private nextId = 1;
-  private world: World;
+  /** Ids are unique across every map, so clients never confuse two zombies. */
+  private static nextId = 1;
+  private ground: Ground;
   private opts: MonsterOptions;
   private rng: () => number;
 
-  constructor(world: World, opts: MonsterOptions, rng: () => number = Math.random) {
-    this.world = world;
+  /** `ground` is a map's Ground, or the overworld's World. */
+  constructor(ground: Ground | World, opts: MonsterOptions, rng: () => number = Math.random) {
+    this.ground = "tileAt" in ground ? overworldGround(ground) : ground;
     this.opts = opts;
     this.rng = rng;
   }
@@ -139,14 +194,15 @@ export class Monsters {
     }
 
     for (const p of targets) {
-      if (Math.hypot(p.x, p.y) < BASE.clearRadius || this.rng() >= o.spawnChance) continue;
+      if (this.ground.quiet(p.x, p.y) || this.rng() >= o.spawnChance) continue;
       let near = 0;
       for (const m of this.all.values()) if (cheb(m, p) <= o.spawnMaxTiles) near++;
       if (near >= o.maxNearPlayer) continue;
       const spot = this.findSpawn(p, players);
       if (!spot) continue;
       const m: Monster = {
-        id: this.nextId++, kind: "zombie", count: rollPackSize(this.rng), ...spot, nextStepAt: now + o.stepMs, lastNearPlayerAt: now,
+        id: Monsters.nextId++, kind: "zombie", count: Math.min(o.maxPack, rollPackSize(this.rng)), ...spot,
+        nextStepAt: now + o.stepMs, lastNearPlayerAt: now,
       };
       this.all.set(m.id, m);
       changed.add(m.id);
@@ -161,7 +217,9 @@ export class Monsters {
         if (contacted.has(p.id)) continue;
         if (cheb(p, m) <= o.aggroTiles && (!target || cheb(p, m) < cheb(target, m))) target = p;
       }
-      const step = target ? this.stepToward(m, target, players) : this.rng() < 0.3 ? this.wander(m, players) : undefined;
+      const step = target
+        ? this.ground.pathfind ? this.pathToward(m, target, players) : this.stepToward(m, target, players)
+        : this.rng() < 0.3 ? this.wander(m, players) : undefined;
       if (!step) continue;
       m.x = step.x;
       m.y = step.y;
@@ -176,14 +234,34 @@ export class Monsters {
 
   /** Free for a zombie to stand on; `prey` (the player being chased) is allowed. */
   private canEnter(x: number, y: number, players: Pos[], prey?: Pos): boolean {
-    const tile = this.world.tileAt(x, y);
     return (
-      !inSafeZone(x, y) &&
-      isPassable(tile) &&
-      tile !== T.CAMP_ICON && // Zombies leave the camps alone.
+      this.ground.open(x, y) &&
       !this.at(x, y) &&
       !players.some((p) => p !== prey && p.x === x && p.y === y)
     );
+  }
+
+  /** The first step of a shortest path to the player (within aggro range), round walls and through doors. */
+  private pathToward(m: Monster, t: PlayerPos, players: Pos[]): Pos | undefined {
+    const limit = this.opts.aggroTiles * 2;
+    const key = (x: number, y: number) => `${x},${y}`;
+    const first = new Map<string, Pos | null>([[key(m.x, m.y), null]]);
+    const queue: Pos[] = [{ x: m.x, y: m.y }];
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
+    while (queue.length) {
+      const c = queue.shift()!;
+      for (const [dx, dy] of dirs) {
+        const n = { x: c.x + dx, y: c.y + dy };
+        const k = key(n.x, n.y);
+        if (first.has(k) || cheb(n, m) > limit) continue;
+        const via = first.get(key(c.x, c.y)) ?? n;
+        if (n.x === t.x && n.y === t.y) return this.canEnter(via.x, via.y, players, t) ? via : undefined;
+        if (!this.canEnter(n.x, n.y, players)) continue;
+        first.set(k, via);
+        queue.push(n);
+      }
+    }
+    return undefined;
   }
 
   /** Greedy shamble: close the larger gap first, sometimes the other one to slide round obstacles. */
@@ -215,9 +293,9 @@ export class Monsters {
       const x = p.x + Math.floor(this.rng() * (2 * max + 1)) - max;
       const y = p.y + Math.floor(this.rng() * (2 * max + 1)) - max;
       const d = cheb({ x, y }, p);
-      if (d < min || d > max || Math.hypot(x, y) < BASE.clearRadius) continue;
+      if (d < min || d > max || this.ground.quiet(x, y)) continue;
       if (players.some((q) => cheb(q, { x, y }) < min) || !this.canEnter(x, y, players)) continue;
-      if (this.world.tileAt(x, y) === T.RADIATION) return { x, y };
+      if (this.ground.favoured(x, y)) return { x, y };
       fallback ??= { x, y };
     }
     return fallback;

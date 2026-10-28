@@ -14,27 +14,27 @@ sky_material = SubResource("ProceduralSkyMaterial_dust")
 
 [sub_resource type="Environment" id="Environment_waste"]
 background_mode = 1
-background_color = Color(0, 0, 0, 1)
+background_color = Color(0.46, 0.43, 0.38, 1)
 sky = SubResource("Sky_dust")
 ambient_light_source = 3
 ambient_light_color = Color(0.6, 0.55, 0.5, 1)
-ambient_light_energy = 0.3
+ambient_light_energy = 0.6
 tonemap_mode = 2
 glow_enabled = true
 fog_enabled = true
 fog_mode = 1
-fog_light_color = Color(0, 0, 0, 1)
+fog_light_color = Color(0.46, 0.43, 0.38, 1)
 fog_sun_scatter = 0.0
 fog_density = 1.0
 fog_aerial_perspective = 0.0
 fog_sky_affect = 1.0
 fog_height = 0.5
 fog_height_density = 0.08
-fog_depth_curve = 0.6
-fog_depth_begin = 3.0
-fog_depth_end = 18.0
+fog_depth_curve = 1.4
+fog_depth_begin = 4.0
+fog_depth_end = 42.0
 adjustment_enabled = true
-adjustment_brightness = 0.85
+adjustment_brightness = 1.0
 adjustment_contrast = 1.05
 adjustment_saturation = 0.8
 
@@ -62,7 +62,7 @@ environment = SubResource("Environment_waste")
 [node name="Sun" type="DirectionalLight3D" parent="."]
 unique_name_in_owner = true
 light_color = Color(1, 0.9, 0.78, 1)
-light_energy = 0.6
+light_energy = 1.0
 shadow_enabled = true
 
 [node name="Arena" type="Node3D" parent="."]

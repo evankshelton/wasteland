@@ -11,7 +11,7 @@ signal disconnected(reason: String)
 ## The player's character changed: a reroll, accepting it, XP, a level, health...
 signal character_changed(character: Dictionary)
 
-const PROTOCOL_VERSION := 8
+const PROTOCOL_VERSION := 10
 const CONNECT_TIMEOUT_MS := 8000
 
 ## The server's welcome message while joined, otherwise empty.
@@ -29,6 +29,11 @@ var _port := 0
 var _player_name := ""
 var _server_error := ""
 var _inbox: Array[Dictionary] = []
+
+
+## The server we're connected to, as text fit for a file name.
+func server_key() -> String:
+	return ("%s_%d" % [_host, _port]).validate_filename()
 
 
 func connect_to(host: String, port: int, player_name: String) -> Error:

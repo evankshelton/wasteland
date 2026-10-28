@@ -114,6 +114,28 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   drawn from ten trades: gunsmith, armorer, medic, rad doc, scrap trader, water
   seller, cook, barkeep, mechanic and rumormonger. Camp medics heal like Doc
   Ellis; the rest only talk for now. Zombies don't step onto camp icons.
+- **Dungeons**: about 5% of newly generated chunks hold a dungeon entrance
+  (never within 30 tiles of the base): a single rock-arch tile on the
+  overworld. Stand on it and press **E** to climb down. Each dungeon has a name
+  ("The Flooded Catacombs") and 2–4 levels, each its own labyrinth grown from
+  the dungeon's saved seed (`server/src/dungeons.ts`): 5–14 named rooms behind
+  doors, joined by winding passages with a few loops and dead ends, all walled
+  in rock. You arrive by the ladder in the Entrance Hall of level 1 (step onto
+  it to climb straight back out). On every level but the last, stairs down
+  wait in the room farthest from where you arrive; on the bottom level that
+  room holds the stairs to the surface, which bring you out beside the
+  entrance. Below level 1 you arrive at the foot of stairs up, which take you
+  back to the level above (beside its stairs down), so you can also leave the
+  way you came: up level by level and out by the ladder. Dungeons have a fog of war: you only see the rooms and passages in
+  your line of sight (7 tiles, walls and doors block it; a room you're in is
+  seen whole). What you've seen stays on the map, dimmed when out of sight,
+  and is remembered between visits; zombies only show while in sight. Zombies
+  roam every level, in packs of up to 6 on level 1 and bigger the deeper you
+  go: they appear 7–13 tiles from you and find their way through the passages
+  to you, but leave you alone right where you arrive and by the ways out. A dungeon fight takes place
+  underground, in the rock passages around you, under a stone ceiling, by the
+  light of the torch you carry. Fleeing comes out a few tiles away in the
+  dungeon, as far as the walls allow.
 - **Radioactive zombies** spawn out in the wasteland, 12–18 tiles from a player
   (just off screen), more readily in hot zones. They shamble one tile every
   0.9s (players are about 7× faster) towards the nearest player within 20
@@ -132,8 +154,8 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   rolls gently, and terrain shapes it: hills rise, toxic water and marsh sit
   in hollows, and roads and ruins are flattened. Neighbouring terrain types
   blend into each other along meandering borders instead of meeting in
-  squares (`client/shaders/`). Thick fog closes in a few metres out and
-  fades everything to black by 18 m, with no horizon, with fog banks
+  squares (`client/shaders/`). A dusty daytime haze thickens with
+  distance until there's nothing but haze by about 40 m, with no horizon, with fog banks
   drifting by and dust and ash hanging in the air, so zombies loom out of the haze only
   once they're near. Mountains,
   ruined buildings, base walls and toxic water are solid; dead forests are
@@ -176,7 +198,10 @@ Client end-to-end test (with a server running). Add `--expect-base` to play a
 brand-new character through the base: start inside, talk to the gate guard,
 walk out, step onto the icon and press E to go back in. `--expect-camp` does
 the same for an encampment, against a server that drops the player on a camp's
-icon the first time they leave the base.
+icon the first time they leave the base. `--expect-dungeon` goes down a
+dungeon the same way (against a server that drops the player on an entrance and
+spawns dungeon zombies eagerly): it walks away from the ladder, wins a fight
+underground, and climbs back out.
 
 ```bash
 godot --headless --path client res://tests/smoke_test.tscn -- --host 127.0.0.1 --port 7777

@@ -4,8 +4,17 @@ import { dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import type { Character } from "./character.ts";
 
-/** Which map a player is on: the overworld, the base, or an encampment by id. */
-export type Location = "overworld" | "base" | `camp:${number}`;
+/** Which map a player is on: the overworld, the base, an encampment by id, or a dungeon by id and level. */
+export type Location = "overworld" | "base" | `camp:${number}` | `dungeon:${number}:${number}`;
+
+export interface DungeonRecord {
+  id: number;
+  x: number;
+  y: number;
+  name: string;
+  /** The dungeon's layout grows from this (dungeons.ts dungeonLayout). */
+  seed: number;
+}
 
 export interface CampRecord {
   id: number;
@@ -54,6 +63,9 @@ export class Storage {
     allCamps: StatementSync;
     visitCamp: StatementSync;
     visitedCamps: StatementSync;
+    insertDungeon: StatementSync;
+    dungeonAt: StatementSync;
+    dungeonById: StatementSync;
   };
 
   constructor(path: string) {
@@ -97,6 +109,15 @@ export class Storage {
         visited_at INTEGER NOT NULL,
         PRIMARY KEY (player_id, camp_id)
       );
+      CREATE TABLE IF NOT EXISTS dungeons (
+        id         INTEGER PRIMARY KEY,
+        x          INTEGER NOT NULL,
+        y          INTEGER NOT NULL,
+        name       TEXT    NOT NULL,
+        seed       INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS dungeons_at ON dungeons (x, y);
     `);
     this.upgradeSchema();
     this.q = {
@@ -118,6 +139,9 @@ export class Storage {
       campByName: this.db.prepare("SELECT id FROM camps WHERE name = ?"),
       campsIn: this.db.prepare("SELECT id, x, y, name, seed FROM camps WHERE x >= ? AND x < ? AND y >= ? AND y < ?"),
       allCamps: this.db.prepare("SELECT id, x, y, name, seed FROM camps"),
+      insertDungeon: this.db.prepare("INSERT INTO dungeons (x, y, name, seed, created_at) VALUES (?, ?, ?, ?, ?)"),
+      dungeonAt: this.db.prepare("SELECT id, x, y, name, seed FROM dungeons WHERE x = ? AND y = ?"),
+      dungeonById: this.db.prepare("SELECT id, x, y, name, seed FROM dungeons WHERE id = ?"),
       visitCamp: this.db.prepare("INSERT OR IGNORE INTO camp_visits (player_id, camp_id, visited_at) VALUES (?, ?, ?)"),
       visitedCamps: this.db.prepare(
         "SELECT c.id, c.x, c.y, c.name, c.seed FROM camps c JOIN camp_visits v ON v.camp_id = c.id WHERE v.player_id = ?",
@@ -174,6 +198,19 @@ export class Storage {
     if (!row) return undefined;
     const { character, ...rec } = row;
     return { ...rec, char: character ? (JSON.parse(character) as Character) : undefined };
+  }
+
+  createDungeon(x: number, y: number, name: string, seed: number): DungeonRecord {
+    const res = this.q.insertDungeon.run(x, y, name, seed, Date.now());
+    return { id: Number(res.lastInsertRowid), x, y, name, seed };
+  }
+
+  dungeonAt(x: number, y: number): DungeonRecord | undefined {
+    return this.q.dungeonAt.get(x, y) as DungeonRecord | undefined;
+  }
+
+  dungeonById(id: number): DungeonRecord | undefined {
+    return this.q.dungeonById.get(id) as DungeonRecord | undefined;
   }
 
   createCamp(x: number, y: number, name: string, seed: number): CampRecord {

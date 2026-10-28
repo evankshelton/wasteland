@@ -33,6 +33,13 @@
     { "id": 28, "key": "camp_icon",   "name": "Encampment",       "passable": true,  "color": "#e8c060" },
     { "id": 29, "key": "tent",        "name": "Tent",             "passable": false, "color": "#8a7a50" },
     { "id": 30, "key": "campfire",    "name": "Campfire",         "passable": false, "color": "#ff6a20" },
-    { "id": 31, "key": "barricade",   "name": "Scrap Barricade",  "passable": false, "color": "#6a5a4a" }
+    { "id": 31, "key": "barricade",   "name": "Scrap Barricade",  "passable": false, "color": "#6a5a4a" },
+    { "id": 32, "key": "dungeon_icon", "name": "Dungeon Entrance", "passable": true,  "color": "#aa00aa" },
+    { "id": 33, "key": "cave_wall",   "name": "Rock Wall",        "passable": false, "color": "#555555" },
+    { "id": 34, "key": "cave_floor",  "name": "Tunnel Floor",     "passable": true,  "color": "#2a2a2a" },
+    { "id": 35, "key": "ladder",      "name": "Ladder Up",        "passable": true,  "color": "#aa5500" },
+    { "id": 36, "key": "stairs_down", "name": "Stairs Down",      "passable": true,  "color": "#aaaaaa" },
+    { "id": 37, "key": "stairs_out",  "name": "Stairs to the Surface", "passable": true, "color": "#ffff55" },
+    { "id": 38, "key": "stairs_up",   "name": "Stairs Up",        "passable": true,  "color": "#ffffff" }
   ]
 }

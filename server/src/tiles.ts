@@ -48,6 +48,11 @@ export const T = {
   BASE_GATE: id("base_gate"),
   BASE_ICON: id("base_icon"),
   CAMP_ICON: id("camp_icon"),
+  DUNGEON_ICON: id("dungeon_icon"),
+  LADDER: id("ladder"),
+  STAIRS_DOWN: id("stairs_down"),
+  STAIRS_OUT: id("stairs_out"),
+  STAIRS_UP: id("stairs_up"),
 } as const;
 
 const passable = new Uint8Array(256);

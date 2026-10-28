@@ -5,8 +5,9 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { DIR_DELTA, PROTOCOL_VERSION, parseClientMsg, validName, type ClientMsg, type ServerMsg } from "./protocol.ts";
 import { BaseMap } from "./base.ts";
 import { campLayout } from "./camps.ts";
+import { dungeonDepth, dungeonLayout } from "./dungeons.ts";
 import { XP, gainXp, raise, rollCharacter, type Character } from "./character.ts";
-import { Monsters, inSafeZone, type Monster, type MonsterOptions } from "./monsters.ts";
+import { DUNGEON_MONSTER_OPTIONS, Monsters, dungeonGround, type Monster, type MonsterOptions } from "./monsters.ts";
 import type { Location, Storage } from "./storage.ts";
 import { T, TILE_DEFS, isPassable } from "./tiles.ts";
 import { chunkOf, type World } from "./world.ts";
@@ -34,6 +35,8 @@ export interface ServerOptions {
 
 interface Encounter {
   id: number;
+  /** The map the fight is on; x, y are in its coordinates. */
+  loc: Location;
   x: number;
   y: number;
   enemies: Monster[];
@@ -60,7 +63,7 @@ interface Player {
   x: number;
   y: number;
   loc: Location;
-  /** Position on the site's map (the base or a camp) while loc isn't "overworld". */
+  /** Position on the site's map (the base, a camp or a dungeon) while loc isn't "overworld". */
   bx: number;
   by: number;
   char: Character;
@@ -85,6 +88,8 @@ export class GameServer {
   private storage: Storage;
   private base: BaseMap;
   private camps = new Map<number, BaseMap>(); // camp maps built so far, by camp id
+  private dungeons = new Map<string, BaseMap>(); // dungeon levels built so far, by location
+  private dungeonMobs = new Map<string, Monsters>(); // each dungeon level's zombies, while anyone's been down there
   private opts: ServerOptions;
 
   constructor(world: World, storage: Storage, base: BaseMap, opts: ServerOptions) {
@@ -328,6 +333,19 @@ export class GameServer {
   /** The map for a site location: the base, or a camp (built from its seed the first time). */
   private siteOf(loc: Location): BaseMap | undefined {
     if (loc === "base") return this.base;
+    const down = dungeonLevel(loc);
+    if (down) {
+      let site = this.dungeons.get(loc);
+      if (!site) {
+        const d = this.storage.dungeonById(down.id);
+        const depth = d ? dungeonDepth(d.seed) : 0;
+        if (!d || down.level < 1 || down.level > depth) return undefined;
+        const name = `${d.name}, Level ${down.level} of ${depth}`;
+        site = new BaseMap(dungeonLayout(d.seed, name, down.level, depth), { x: d.x, y: d.y });
+        this.dungeons.set(loc, site);
+      }
+      return site;
+    }
     if (!loc.startsWith("camp:")) return undefined;
     const id = Number(loc.slice(5));
     let site = this.camps.get(id);
@@ -350,7 +368,8 @@ export class GameServer {
     }
     this.send(s, {
       t: "location",
-      kind: p.loc === "base" ? "base" : "camp",
+      kind: p.loc === "base" ? "base" : dungeonLevel(p.loc) ? "dungeon" : "camp",
+      site: p.loc,
       name: b.name,
       icon: b.icon,
       width: b.width,
@@ -363,14 +382,16 @@ export class GameServer {
     });
   }
 
-  /** Step through the base's (or an encampment's) icon into it. */
+  /** Step through the base's (or an encampment's, or a dungeon's) icon into it. */
   private onEnter(s: Session): void {
     const p = s.player;
     if (!p) return this.fail(s, "not_joined", "Say hello first.");
     if (p.loc !== "overworld" || s.encounter) return;
     const tile = this.world.tileAt(p.x, p.y);
     const camp = tile === T.CAMP_ICON ? this.storage.campAt(p.x, p.y) : undefined;
-    const loc: Location | undefined = tile === T.BASE_ICON ? "base" : camp ? `camp:${camp.id}` : undefined;
+    const dungeon = tile === T.DUNGEON_ICON ? this.storage.dungeonAt(p.x, p.y) : undefined;
+    const loc: Location | undefined =
+      tile === T.BASE_ICON ? "base" : camp ? `camp:${camp.id}` : dungeon ? `dungeon:${dungeon.id}:1` : undefined;
     const site = loc && this.siteOf(loc);
     if (!loc || !site) {
       this.send(s, { t: "notice", text: "There's nothing here to enter." });
@@ -459,7 +480,37 @@ export class GameServer {
       this.changeLocation(s, "overworld", out);
       return;
     }
-    const ok = site.walkable(nx, ny);
+    if (s.encounter) {
+      this.send(s, { t: "you", x: p.bx, y: p.by, seq: msg.seq, ok: false });
+      return;
+    }
+    const down = dungeonLevel(p.loc);
+    if (down && (site.isDown(nx, ny) || site.isUp(nx, ny))) {
+      // Down the stairs to the foot of the stairs up on the next level, or up
+      // them to beside the stairs down on the level above.
+      const goingUp = site.isUp(nx, ny);
+      const next: Location = `dungeon:${down.id}:${down.level + (goingUp ? -1 : 1)}`;
+      const there = this.siteOf(next);
+      if (there) {
+        const at = goingUp ? there.beside(there.down[0] ?? there.entry) : there.entry;
+        s.lastMoveAt = now;
+        this.send(s, { t: "you", x: at.x, y: at.y, seq: msg.seq, ok: true });
+        this.changeLocation(s, next, at);
+        return;
+      }
+    }
+    if (site.isExit(nx, ny)) {
+      // Up the ladder, or the stairs out of the bottom level: out beside the entrance.
+      s.lastMoveAt = now;
+      const out = this.exitTile(site, 0, 1);
+      this.send(s, { t: "you", x: out.x, y: out.y, seq: msg.seq, ok: true });
+      this.changeLocation(s, "overworld", out);
+      return;
+    }
+    const mobs = this.mobsFor(p.loc);
+    const zombie = mobs?.at(nx, ny);
+    // Walking into a zombie starts a fight, unless we only just got away from one.
+    const ok = site.walkable(nx, ny) && (!zombie || now >= s.graceUntil);
     if (ok) {
       p.bx = nx;
       p.by = ny;
@@ -468,18 +519,45 @@ export class GameServer {
     }
     this.send(s, { t: "you", x: p.bx, y: p.by, seq: msg.seq, ok });
     if (ok) this.updateVisibility(s);
+    if (ok && zombie) this.startEncounter(s);
+    else if (ok && mobs) this.syncMonsters(s);
+  }
+
+  /** The zombies roaming a map: the overworld's, or a dungeon level's (made on first need). Sites have none. */
+  private mobsFor(loc: Location): Monsters | undefined {
+    if (loc === "overworld") return this.monsters;
+    const down = dungeonLevel(loc);
+    if (!down) return undefined;
+    let mobs = this.dungeonMobs.get(loc);
+    const site = this.siteOf(loc);
+    if (!mobs && site) {
+      // The deeper you go, the bigger the packs.
+      const opts = { ...this.opts.monsters, ...DUNGEON_MONSTER_OPTIONS, maxPack: Math.min(15, 4 + down.level * 2) };
+      if (this.opts.monsters.spawnChance === 0) opts.spawnChance = 0; // Spawning switched off (as in tests) is off down here too.
+      mobs = new Monsters(dungeonGround(site), opts);
+      this.dungeonMobs.set(loc, mobs);
+    }
+    return mobs;
+  }
+
+  /** Can a player stand at (x, y) on this map? */
+  private standable(loc: Location, x: number, y: number): boolean {
+    if (loc === "overworld") return isPassable(this.world.tileAt(x, y));
+    const site = this.siteOf(loc);
+    return site !== undefined && site.walkable(x, y) && !site.isExit(x, y);
   }
 
   /** Pull every zombie near the player into a first-person fight. */
   private startEncounter(s: Session): void {
     const p = s.player!;
-    const enemies = this.monsters.take(p, this.opts.encounterRadius);
-    const enc: Encounter = { id: this.nextEncounterId++, x: p.x, y: p.y, enemies };
+    const here = whereIs(p);
+    const enemies = this.mobsFor(here.loc)?.take(here, this.opts.encounterRadius) ?? [];
+    const enc: Encounter = { id: this.nextEncounterId++, loc: here.loc, x: here.x, y: here.y, enemies };
     s.encounter = enc;
     const removed = enemies.map((m) => m.id);
     for (const other of this.sessions) if (other.player) this.syncMonsters(other, undefined, removed);
     const total = enemies.reduce((n, m) => n + m.count, 0);
-    log(`[encounter] "${p.name}" vs ${total} zombie(s) in ${enemies.length} pack(s) at (${p.x}, ${p.y})`);
+    log(`[encounter] "${p.name}" vs ${total} zombie(s) in ${enemies.length} pack(s) in the ${here.loc} at (${here.x}, ${here.y})`);
     this.send(s, {
       t: "encounter_start",
       id: enc.id,
@@ -514,12 +592,16 @@ export class GameServer {
     if (msg.result === "fled" && msg.dir) {
       // Come out of the fight a few tiles away in the direction we ran.
       const [dx, dy] = DIR_DELTA[msg.dir];
+      const mobs = this.mobsFor(enc.loc);
       for (let d = 3; d >= 1; d--) {
         const nx = enc.x + dx * d;
         const ny = enc.y + dy * d;
-        if (isPassable(this.world.tileAt(nx, ny)) && !survivors.some((m) => m.x === nx && m.y === ny) && !this.monsters.at(nx, ny)) {
-          p.x = nx;
-          p.y = ny;
+        // Only as far as the way is clear (a dungeon wall stops you short).
+        let clear = true;
+        for (let i = 1; i <= d; i++) clear &&= this.standable(enc.loc, enc.x + dx * i, enc.y + dy * i);
+        if (clear && !survivors.some((m) => m.x === nx && m.y === ny) && !mobs?.at(nx, ny)) {
+          if (enc.loc === "overworld") [p.x, p.y] = [nx, ny];
+          else [p.bx, p.by] = [nx, ny];
           break;
         }
       }
@@ -527,13 +609,14 @@ export class GameServer {
 
     this.endEncounter(s, survivors);
     s.dirty = true;
-    log(`[encounter] "${p.name}" ${msg.result} (${kills} killed) -> (${p.x}, ${p.y})`);
+    const after = whereIs(p);
+    log(`[encounter] "${p.name}" ${msg.result} (${kills} killed) -> (${after.x}, ${after.y})`);
     // Health only goes down in a fight; dying means waking up healed in the infirmary.
     const c = p.char;
     if (msg.result === "died") c.hp = c.maxHp;
     else if (msg.hp !== undefined) c.hp = Math.max(1, Math.min(c.hp, Math.ceil(msg.hp)));
     this.storage.saveCharacter(p.id, c);
-    this.send(s, { t: "encounter_over", id: enc.id, result: msg.result, x: p.x, y: p.y });
+    this.send(s, { t: "encounter_over", id: enc.id, result: msg.result, x: after.x, y: after.y });
     const xp = kills * XP.kill + (msg.result === "victory" ? XP.victory : 0);
     if (xp > 0) this.award(s, xp, `${kills} zombie${kills === 1 ? "" : "s"} put down${msg.result === "victory" ? ", area cleared" : ""}`);
     else this.sendCharacter(s);
@@ -542,21 +625,23 @@ export class GameServer {
       this.changeLocation(s, "base", this.base.respawn);
       return;
     }
-    this.streamChunks(s);
+    if (p.loc === "overworld") this.streamChunks(s);
     this.updateVisibility(s);
     this.syncMonsters(s);
   }
 
   /** Close the encounter and put surviving zombies back where they stood. */
   private endEncounter(s: Session, survivors: Monster[]): void {
+    const enc = s.encounter!;
     s.encounter = undefined;
     const now = Date.now();
     s.graceUntil = now + this.opts.encounterGraceMs;
-    const players = [...this.sessions].filter((o) => o.player?.loc === "overworld").map((o) => o.player!);
-    if (s.player && !this.sessions.has(s)) players.push(s.player);
+    const players = [...this.sessions].filter((o) => o.player && o.player.loc === enc.loc).map((o) => whereIs(o.player!));
+    if (s.player && !this.sessions.has(s)) players.push(whereIs(s.player));
+    const mobs = this.mobsFor(enc.loc);
     const back = new Set<number>();
     for (const m of survivors) {
-      if (!inSafeZone(m.x, m.y) && this.monsters.restore(m, now, players)) back.add(m.id);
+      if (mobs?.restore(m, now, players)) back.add(m.id);
     }
     for (const other of this.sessions) if (other.player && other !== s) this.syncMonsters(other, back);
   }
@@ -650,18 +735,33 @@ export class GameServer {
   /** Advance the monsters and tell each player about changes within view. */
   private tick(): void {
     const now = Date.now();
-    // Zombies only know about the overworld; the base is safe.
-    const sessions = [...this.sessions].filter((s) => s.player?.loc === "overworld" && s.player.char.created);
-    const { changed, removed, contacts } = this.monsters.tick(
-      now,
-      sessions.map((s) => ({ ...s.player!, targetable: !s.encounter && now >= s.graceUntil })),
-    );
-    if (changed.size > 0 || removed.length > 0) {
-      for (const s of sessions) this.syncMonsters(s, changed, removed);
+    // Zombies roam the overworld and the dungeons; the base and the camps are safe.
+    const maps: [Location, Monsters][] = [["overworld", this.monsters]];
+    const occupied = new Set<Location>();
+    for (const s of this.sessions) if (s.player && dungeonLevel(s.player.loc)) occupied.add(s.player.loc);
+    for (const loc of occupied) {
+      const mobs = this.mobsFor(loc);
+      if (mobs) maps.push([loc, mobs]);
     }
-    for (const c of contacts) {
-      const s = this.byPlayerId.get(c.playerId);
-      if (s && !s.encounter) this.startEncounter(s);
+    for (const [loc, mobs] of this.dungeonMobs) {
+      if (!occupied.has(loc as Location)) {
+        if (mobs.all.size === 0) this.dungeonMobs.delete(loc); // Nobody down there and nothing left: forget it.
+        else maps.push([loc as Location, mobs]);
+      }
+    }
+    for (const [loc, mobs] of maps) {
+      const sessions = [...this.sessions].filter((s) => s.player?.loc === loc && s.player.char.created);
+      const { changed, removed, contacts } = mobs.tick(
+        now,
+        sessions.map((s) => ({ ...whereIs(s.player!), id: s.player!.id, targetable: !s.encounter && now >= s.graceUntil })),
+      );
+      if (changed.size > 0 || removed.length > 0) {
+        for (const s of sessions) this.syncMonsters(s, changed, removed);
+      }
+      for (const c of contacts) {
+        const s = this.byPlayerId.get(c.playerId);
+        if (s && !s.encounter) this.startEncounter(s);
+      }
     }
   }
 
@@ -670,12 +770,20 @@ export class GameServer {
    * forget ones that left view or were removed.
    */
   private syncMonsters(s: Session, changed?: Set<number>, removed: number[] = []): void {
-    const p = s.player!;
+    const p = whereIs(s.player!);
+    const mobs = this.mobsFor(p.loc);
     for (const id of removed) {
       if (s.seenMonsters.delete(id)) this.send(s, { t: "monster_left", id });
     }
-    for (const m of this.monsters.all.values()) {
-      const near = p.loc === "overworld" && Math.max(Math.abs(m.x - p.x), Math.abs(m.y - p.y)) <= this.opts.viewTiles;
+    for (const id of s.seenMonsters) {
+      // Zombies on a map the player has left.
+      if (!mobs?.all.has(id)) {
+        s.seenMonsters.delete(id);
+        this.send(s, { t: "monster_left", id });
+      }
+    }
+    for (const m of mobs?.all.values() ?? []) {
+      const near = Math.max(Math.abs(m.x - p.x), Math.abs(m.y - p.y)) <= this.opts.viewTiles;
       if (near) {
         if (!s.seenMonsters.has(m.id) || changed?.has(m.id)) {
           this.send(s, { t: "monster", id: m.id, kind: m.kind, count: m.count, x: m.x, y: m.y });
@@ -696,6 +804,12 @@ export class GameServer {
     this.send(s, { t: "error", code, message });
     s.ws.close(4001, code);
   }
+}
+
+/** The dungeon and level of a dungeon location ("dungeon:<id>:<level>"; older saves have no level: the first). */
+function dungeonLevel(loc: string): { id: number; level: number } | undefined {
+  const m = /^dungeon:(\d+)(?::(\d+))?$/.exec(loc);
+  return m ? { id: Number(m[1]), level: m[2] ? Number(m[2]) : 1 } : undefined;
 }
 
 function tokensEqual(a: string, b: string): boolean {

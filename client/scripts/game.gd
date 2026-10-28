@@ -22,6 +22,8 @@ const OTHER_TINT := Color(1.0, 0.6, 0.3)
 const ZOMBIE_REGION := Rect2(16, 0, 16, 16) ## sprites.png column 1
 const ZOMBIE_STEP_TIME := 0.35 ## seconds to animate one shambling step
 const NPC_TINT := Color(0.55, 0.85, 1.0)
+const SIGHT := 7 ## tiles you can see in a dungeon, along a clear line (a room you're in is seen whole)
+const FOG_DIM := Color(0, 0, 0, 0.55) ## over dungeon tiles you've seen before but can't see now
 ## Level-up choices: [character key, ability for the server, label].
 const RAISE_CHOICES := [["str", "str", "Strength"], ["dex", "dex", "Dexterity"], ["int", "int", "Intelligence"], ["maxHp", "hp", "Hit Points"]]
 const RAISE_BY := 2
@@ -46,9 +48,9 @@ var monsters := {} ## monster id -> Sprite2D
 var monster_positions := {} ## monster id -> Vector2i
 var encounter: Node3D ## the first-person fight, while one is running
 var last_encounter_result := ""
-## "overworld", "base" or "camp": which map pos (and every position from the server) refers to.
+## "overworld", "base", "camp" or "dungeon": which map pos (and every position from the server) refers to.
 var location := "overworld"
-var site_info := {} ## the server's "location" message for the base or camp we're in: name, rooms, npcs...
+var site_info := {} ## the server's "location" message for the base, camp or dungeon we're in: name, rooms, npcs...
 var site_icon := Vector2i.ZERO ## that site's icon on the overworld
 var npcs := {} ## Vector2i -> NPC dictionary, while in a site
 var camps := {} ## Vector2i icon position -> encampment name, for every camp we've heard of
@@ -58,6 +60,14 @@ var _site_tiles := PackedByteArray()
 var _site_size := Vector2i.ZERO
 var _base_icon_id := -1
 var _camp_icon_id := -1
+var _dungeon_icon_id := -1
+var _door_id := -1
+## Fog of war in dungeons: only tiles you've seen are drawn, dimmed unless in sight right now.
+var _explored := {} ## Vector2i -> true: tiles seen on this dungeon level (remembered between visits)
+var _in_sight := {} ## Vector2i -> true: tiles in sight right now
+var _explored_path := "" ## where this level's explored tiles are saved
+var _fog_shade: Node2D ## dims explored tiles out of sight
+var _site := "" ## the server's id for the site we're in ("dungeon:<id>:<level>"...), to tell up from down
 var _camp_labels: Node2D ## camp names floating over their icons on the overworld
 var _counter_id := -1
 var _arrived := false
@@ -111,9 +121,16 @@ func _ready() -> void:
 		match str(t.key):
 			"base_icon": _base_icon_id = id
 			"camp_icon": _camp_icon_id = id
+			"dungeon_icon": _dungeon_icon_id = id
+			"door": _door_id = id
 			"counter": _counter_id = id
 	terrain.tile_set = _build_tileset(tile_names.size())
 	base_terrain.tile_set = terrain.tile_set
+	_fog_shade = Node2D.new()
+	_fog_shade.visible = false
+	_fog_shade.draw.connect(_draw_fog_shade)
+	add_child(_fog_shade)
+	move_child(_fog_shade, base_terrain.get_index() + 1)
 	_camp_labels = Node2D.new()
 	add_child(_camp_labels)
 	move_child(_camp_labels, base_terrain.get_index() + 1)
@@ -178,7 +195,11 @@ func _handle(msg: Dictionary) -> void:
 				_pending_seq = -1
 			var server_pos := Vector2i(int(msg.x), int(msg.y))
 			if server_pos != pos:
-				_set_pos(server_pos, true)
+				# More than a step away means we're changing maps (stairs, a ladder, an
+				# edge): the position is on the next map, whose "location" comes next, so
+				# don't look around this one from there.
+				var stepped := maxi(absi(server_pos.x - pos.x), absi(server_pos.y - pos.y)) <= 1
+				_set_pos(server_pos, true, stepped)
 			if not msg.ok:
 				_log("Blocked!")
 		"player":
@@ -281,17 +302,37 @@ func _arrive(msg: Dictionary) -> void:
 		_site_size = Vector2i(int(msg.width), int(msg.height))
 		_site_tiles = Marshalls.base64_to_raw(msg.tiles)
 		base_terrain.clear()
+		_explored.clear()
+		_in_sight.clear()
+		if location == "dungeon":
+			# Fog of war: only what you've seen on this level before; the rest is revealed as you go.
+			var key := "_".join([Net.server_key(), str(Net.welcome.get("name", "")), str(msg.get("site", msg.name))]).validate_filename()
+			_explored_path = "user://dungeon_maps/%s.bin" % key
+			_load_explored()
 		for i in _site_tiles.size():
 			@warning_ignore("integer_division")
-			base_terrain.set_cell(Vector2i(i % _site_size.x, i / _site_size.x), 0, Vector2i(_site_tiles[i], 0))
+			var cell := Vector2i(i % _site_size.x, i / _site_size.x)
+			if location != "dungeon" or _explored.has(cell):
+				base_terrain.set_cell(cell, 0, Vector2i(_site_tiles[i], 0))
 		for n: Dictionary in msg.npcs:
 			var at := Vector2i(int(n.x), int(n.y))
 			npcs[at] = n
 			npcs_root.add_child(_figure(str(n.name), NPC_TINT, at))
-		_log("You are in %s. Walk off any edge to leave." % msg.name if not _arrived else "You enter %s." % msg.name)
+		var site := str(msg.get("site", ""))
+		if location == "dungeon" and not _site.begins_with("dungeon:"):
+			_log("You climb down into %s. The ladder leads back up." % msg.name)
+		elif location == "dungeon" and _site.get_slice(":", 1) == site.get_slice(":", 1) \
+				and _site.get_slice(":", 2).to_int() > site.get_slice(":", 2).to_int():
+			_log("You climb the stairs up to %s." % msg.name)
+		elif location == "dungeon":
+			_log("You go down the stairs to %s." % msg.name)
+		else:
+			_log("You are in %s. Walk off any edge to leave." % msg.name if not _arrived else "You enter %s." % msg.name)
 	elif _arrived:
 		_log("You head back out into the wasteland.")
 	_arrived = true
+	_site = str(msg.get("site", "")) if location != "overworld" else ""
+	_fog_shade.visible = location == "dungeon"
 	_set_pos(Vector2i(int(msg.x), int(msg.y)), true)
 
 
@@ -361,22 +402,119 @@ func _step(action: StringName) -> void:
 		_set_pos(target) # Optimistic; corrected by the server's reply if wrong.
 
 
-func _set_pos(p: Vector2i, snap := false) -> void:
+func _set_pos(p: Vector2i, snap := false, look := true) -> void:
 	pos = p
 	avatar.position = _tile_center(p)
 	if snap:
 		camera.reset_smoothing()
+	if location == "dungeon" and look:
+		_look_around()
 	_update_status()
+
+
+# ---- fog of war (dungeons) ----
+
+## See what's in sight from here: tiles within SIGHT along a clear line
+## (walls and closed doors block it, though you see the wall or door itself),
+## and the whole of any room you're standing in. Newly seen tiles join the map.
+func _look_around() -> void:
+	var seen := {}
+	for dy in range(-SIGHT, SIGHT + 1):
+		for dx in range(-SIGHT, SIGHT + 1):
+			var t := pos + Vector2i(dx, dy)
+			if dx * dx + dy * dy <= SIGHT * SIGHT + SIGHT and _in_site(t) and _clear_line(pos, t):
+				seen[t] = true
+	for room: Dictionary in site_info.get("rooms", []):
+		var rect := Rect2i(int(room.x), int(room.y), int(room.w), int(room.h))
+		if rect.has_point(pos):
+			var walls := rect.grow(1)
+			for y in range(walls.position.y, walls.end.y):
+				for x in range(walls.position.x, walls.end.x):
+					if _in_site(Vector2i(x, y)):
+						seen[Vector2i(x, y)] = true
+	_in_sight = seen
+	var found := false
+	for t: Vector2i in seen:
+		if not _explored.has(t):
+			_explored[t] = true
+			base_terrain.set_cell(t, 0, Vector2i(_site_tiles[t.y * _site_size.x + t.x], 0))
+			found = true
+	if found:
+		_save_explored()
+	_fog_shade.queue_redraw()
+	_fog_monsters()
+
+
+func _in_site(t: Vector2i) -> bool:
+	return t.x >= 0 and t.y >= 0 and t.x < _site_size.x and t.y < _site_size.y
+
+
+## True if nothing between a and b (exclusive) blocks sight.
+func _clear_line(a: Vector2i, b: Vector2i) -> bool:
+	var d := (b - a).abs()
+	var step := Vector2i(signi(b.x - a.x), signi(b.y - a.y))
+	var err := d.x - d.y
+	var at := a
+	while at != b:
+		var e2 := err * 2
+		if e2 > -d.y:
+			err -= d.y
+			at.x += step.x
+		if e2 < d.x:
+			err += d.x
+			at.y += step.y
+		if at == b:
+			return true
+		var id := tile_at(at)
+		if id < 0 or not tile_passable[id] or id == _door_id:
+			return false
+	return true
+
+
+func _draw_fog_shade() -> void:
+	for t: Vector2i in _explored:
+		if not _in_sight.has(t):
+			_fog_shade.draw_rect(Rect2(Vector2(t * TILE), Vector2(TILE, TILE)), FOG_DIM)
+
+
+## In a dungeon you only see the zombies in sight.
+func _fog_monsters() -> void:
+	for id: int in monsters:
+		monsters[id].visible = location != "dungeon" or _in_sight.has(monster_positions.get(id, Vector2i(-1, -1)))
+
+
+func _load_explored() -> void:
+	var file := FileAccess.open(_explored_path, FileAccess.READ)
+	if file == null:
+		return
+	var bits := file.get_buffer(file.get_length())
+	if bits.size() != _site_size.x * _site_size.y:
+		return # A different map (the world was reset): start afresh.
+	for i in bits.size():
+		if bits[i] == 1:
+			@warning_ignore("integer_division")
+			_explored[Vector2i(i % _site_size.x, i / _site_size.x)] = true
+
+
+func _save_explored() -> void:
+	DirAccess.make_dir_recursive_absolute(_explored_path.get_base_dir())
+	var bits := PackedByteArray()
+	bits.resize(_site_size.x * _site_size.y)
+	for t: Vector2i in _explored:
+		bits[t.y * _site_size.x + t.x] = 1
+	var file := FileAccess.open(_explored_path, FileAccess.WRITE)
+	if file:
+		file.store_buffer(bits)
 
 
 # ---- the enter / use key ----
 
-## Enter the base or an encampment from its icon; inside, talk to whoever is next to you or across a counter.
+## Enter the base, an encampment or a dungeon from its icon; inside, talk to whoever is next to you or across a counter.
 func use() -> void:
 	if dialog.visible:
 		_next_line()
 	elif location == "overworld":
-		if tile_at(pos) in [_base_icon_id, _camp_icon_id]:
+		if tile_at(pos) in [_base_icon_id, _camp_icon_id, _dungeon_icon_id]:
 			Net.send({"t": "enter"})
 		else:
 			_log("There's nothing here to enter.")
@@ -460,6 +598,7 @@ func _show_overworld(on: bool) -> void:
 	terrain.visible = on and location == "overworld"
 	_camp_labels.visible = terrain.visible
 	base_terrain.visible = on and location != "overworld"
+	_fog_shade.visible = on and location == "dungeon"
 	hud.visible = on
 	camera.enabled = on
 
@@ -568,6 +707,7 @@ func _upsert_monster(id: int, p: Vector2i) -> void:
 		tween.tween_property(sprite, ^"position", _tile_center(p), ZOMBIE_STEP_TIME)
 		sprite.set_meta(&"tween", tween)
 	monster_positions[id] = p
+	sprite.visible = location != "dungeon" or _in_sight.has(p)
 
 
 # ---- character ----
@@ -635,7 +775,10 @@ func _room_at(p: Vector2i) -> String:
 	for room: Dictionary in site_info.get("rooms", []):
 		if Rect2i(int(room.x), int(room.y), int(room.w), int(room.h)).has_point(p):
 			return str(room.name)
-	return "Outside the walls" if location == "base" else "The camp grounds"
+	match location:
+		"base": return "Outside the walls"
+		"dungeon": return "The passages"
+	return "The camp grounds"
 
 
 func _log(line: String) -> void:

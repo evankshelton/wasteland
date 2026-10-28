@@ -3,7 +3,7 @@
 
 import { ABILITIES, type Ability, type Character } from "./character.ts";
 
-export const PROTOCOL_VERSION = 8;
+export const PROTOCOL_VERSION = 10;
 
 /** Most chunk coordinates a client may ask for in one map_chunks request. */
 export const MAP_BATCH_MAX = 256;
@@ -86,7 +86,9 @@ export type ServerMsg =
   | { t: "location"; kind: "overworld"; x: number; y: number }
   | {
       t: "location";
-      kind: "base" | "camp";
+      kind: "base" | "camp" | "dungeon";
+      /** Which site: "base", "camp:<id>" or "dungeon:<id>:<level>". */
+      site: string;
       name: string;
       /** The site's icon on the overworld. */
       icon: { x: number; y: number };

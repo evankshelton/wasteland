@@ -15,6 +15,14 @@ extends Node
 ## show the camp's name, enter with the enter key, find the camp's booths, and
 ## walk back out off an edge.
 ##
+## --expect-dungeon is the same against a server that drops the player on a
+## dungeon entrance instead, and spawns dungeon zombies eagerly: it must enter
+## with the enter key, see only the explored part of the level (fog of war),
+## walk away from the ladder, get caught and win a fight underground (still in
+## the dungeon afterwards), then take the stairs down level after level,
+## fighting whatever catches it (and once, climbing back up a level and down
+## again), and leave by the stairs out of the bottom.
+##
 ## --expect-encounter also waits for zombies to catch the player, checks the
 ## first-person arena, shoots a zombie, wins that fight, then waits for another
 ## and flees across the arena's edge. Needs a server with a high zombie spawn
@@ -22,7 +30,7 @@ extends Node
 ##
 ## Without --headless it also saves screenshots (--screenshot <path>; the map
 ## view goes to <path> with "_map" before the extension, the fight to "_fps",
-## the base to "_base", the camp to "_camp").
+## the base to "_base", the camp to "_camp", the dungeon to "_dungeon").
 
 const GAME_SCENE := preload("res://scenes/game.tscn")
 const CREATION_SCENE := preload("res://scenes/character_creation.tscn")
@@ -34,6 +42,7 @@ var screenshot := ""
 var expect_encounter := false
 var expect_base := false
 var expect_camp := false
+var expect_dungeon := false
 
 
 func _ready() -> void:
@@ -41,7 +50,8 @@ func _ready() -> void:
 	expect_encounter = "--expect-encounter" in args
 	expect_base = "--expect-base" in args
 	expect_camp = "--expect-camp" in args
-	if (expect_base or expect_camp) and "--name" not in args:
+	expect_dungeon = "--expect-dungeon" in args
+	if (expect_base or expect_camp or expect_dungeon) and "--name" not in args:
 		player_name = "Recruit%d" % (randi() % 100000)
 	for i in args.size() - 1:
 		match args[i]:
@@ -62,6 +72,10 @@ func _run() -> void:
 			return _finish(false, problem)
 	if expect_camp:
 		var problem: String = await _test_camp(game)
+		if not problem.is_empty():
+			return _finish(false, problem)
+	if expect_dungeon:
+		var problem: String = await _test_dungeon(game)
 		if not problem.is_empty():
 			return _finish(false, problem)
 	var start: Vector2i = game.pos
@@ -218,6 +232,130 @@ func _test_camp(game: Node) -> String:
 		return "left %s at %s, expected beside its icon %s" % [camp_name, game.pos, icon]
 	print("left %s at %s" % [camp_name, game.pos])
 	return ""
+
+
+## Returns "" on success, otherwise what went wrong.
+func _test_dungeon(game: Node) -> String:
+	await _steps(game, &"move_down", 4) # Out of the base's south gate...
+	if not await _wait_until(func() -> bool: return game.location == "overworld" and game.tile_at(game.pos) >= 0):
+		return "didn't leave the base"
+	var hole: Vector2i = game.pos # ...and the test server drops us on a dungeon entrance.
+	if game.tile_at(hole) != game._dungeon_icon_id:
+		return "came out on %s at %s, not a dungeon entrance" % [game.tile_names[game.tile_at(hole)], hole]
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_dungeonicon." + screenshot.get_extension())
+	_send_action(&"enter")
+	if not await _wait_until(func() -> bool: return game.location == "dungeon"):
+		return "the enter key on the dungeon entrance didn't go down"
+	var ladder := Vector2i(-1, -1)
+	for y in game._site_size.y:
+		for x in game._site_size.x:
+			if game.tile_names[game.tile_at(Vector2i(x, y))] == "Ladder Up":
+				ladder = Vector2i(x, y)
+	if ladder.x < 0:
+		return "no ladder up in %s" % game.site_info.name
+	print("down in %s (%dx%d), ladder at %s" % [game.site_info.name, game._site_size.x, game._site_size.y, ladder])
+	var drawn: int = game.base_terrain.get_used_cells().size()
+	var area: int = game._site_size.x * game._site_size.y
+	if drawn == 0 or drawn > area / 3:
+		return "fog of war: %d of %d tiles drawn on arrival" % [drawn, area]
+	print("fog of war: %d of %d tiles seen on arrival" % [drawn, area])
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_dungeon." + screenshot.get_extension())
+
+	# Away from the ladder (zombies leave you be beside it) until something finds us.
+	var far := func(t: Vector2i) -> bool: return maxi(absi(t.x - ladder.x), absi(t.y - ladder.y)) >= 8
+	await _walk_to(game, far)
+	var enc: Node3D = await _wait_for_encounter(game)
+	if enc == null:
+		return "nothing came for us in the dungeon"
+	if not enc.underground or enc.sun.visible:
+		return "the fight isn't underground"
+	print("dungeon fight at %s: %d zombie(s)" % [game.pos, enc.enemies.size()])
+	await get_tree().create_timer(1.0).timeout
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_dungeon_fps." + screenshot.get_extension())
+		enc.player.rotate_y(PI)
+		await get_tree().create_timer(0.2).timeout
+		await _screenshot(screenshot.get_basename() + "_dungeon_fps2." + screenshot.get_extension())
+	for e: Zombie3D in enc.enemies.values():
+		e.hit(1000.0)
+	if not await _wait_for_result(game, "victory"):
+		return "dungeon victory was not confirmed (got '%s')" % game.last_encounter_result
+	if game.location != "dungeon":
+		return "left the dungeon after the fight (now in the %s)" % game.location
+
+	# Down the stairs, level after level, and out of the bottom.
+	var level: String = game.site_info.name
+	var shot := false
+	var climbed := false
+	var level2_seen := {} ## level 2's explored tiles as we left it, to check nothing extra appears when we return
+	for leg in 60:
+		if game.location == "overworld":
+			break
+		if game.encounter:
+			for e: Zombie3D in game.encounter.enemies.values():
+				e.hit(1000.0)
+			if not await _wait_for_result(game, "victory"):
+				return "a fight on the way down wasn't won (got '%s')" % game.last_encounter_result
+			continue
+		if game.site_info.name != level:
+			level = game.site_info.name
+			if game._site.ends_with(":2") and not level2_seen.is_empty():
+				# Back on level 2: only what we'd seen here before, and what's in sight now.
+				for t: Vector2i in game._explored:
+					if not level2_seen.has(t) and not game._in_sight.has(t):
+						return "fog of war: %s on level 2 is explored, but we never saw it" % t
+			print("down the stairs to %s at %s, %d tiles seen" % [level, game.pos, game.base_terrain.get_used_cells().size()])
+			if not shot and not screenshot.is_empty():
+				shot = true
+				await _screenshot(screenshot.get_basename() + "_dungeon2." + screenshot.get_extension())
+			if not climbed and game._site.ends_with(":2"):
+				# Back up the stairs we came down, once, and check we're on level 1 again.
+				climbed = true
+				level2_seen = game._explored.duplicate()
+				await _walk_to(game, func(t: Vector2i) -> bool: return game.tile_names[game.tile_at(t)] == "Stairs Up")
+				if not await _wait_until(func() -> bool: return game._site.ends_with(":1")):
+					if not game.encounter:
+						return "climbing the stairs up didn't lead back to level 1 (in %s)" % game.site_info.name
+				else:
+					print("up the stairs again to %s at %s" % [game.site_info.name, game.pos])
+					level = game.site_info.name
+					continue
+		await _walk_to(game, func(t: Vector2i) -> bool: return game.tile_names[game.tile_at(t)] in ["Stairs Down", "Stairs to the Surface"])
+		await _wait_until(func() -> bool: return game.encounter != null or game.location == "overworld" or game.site_info.name != level, 1500)
+	if game.location != "overworld":
+		return "never found the way out of the dungeon (in %s at %s)" % [game.site_info.name, game.pos]
+	if absi(game.pos.x - hole.x) + absi(game.pos.y - hole.y) > 1:
+		return "came out at %s, expected beside the entrance %s" % [game.pos, hole]
+	print("out of the dungeon at %s" % game.pos)
+	return ""
+
+
+## Walk the current map by the shortest way to the first tile `goal` accepts,
+## stopping early if a fight starts.
+func _walk_to(game: Node, goal: Callable) -> void:
+	var dirs := {&"move_up": Vector2i.UP, &"move_down": Vector2i.DOWN, &"move_left": Vector2i.LEFT, &"move_right": Vector2i.RIGHT}
+	var came_from := {game.pos: []}
+	var queue: Array[Vector2i] = [game.pos]
+	var path: Array = []
+	while not queue.is_empty() and path.is_empty():
+		var at: Vector2i = queue.pop_front()
+		for action: StringName in dirs:
+			var next: Vector2i = at + dirs[action]
+			var tile: int = game.tile_at(next)
+			if came_from.has(next) or tile < 0:
+				continue
+			if goal.call(next):
+				path = came_from[at] + [action]
+				break
+			if game.tile_passable[tile] and not game.tile_names[tile] in ["Ladder Up", "Stairs Down", "Stairs to the Surface", "Stairs Up"]:
+				came_from[next] = came_from[at] + [action]
+				queue.append(next)
+	for action: StringName in path:
+		if game.encounter or game.location == "overworld":
+			return
+		await _steps(game, action, 1)
 
 
 ## Steps one tile at a time at the pace of a held key, waiting for each reply
