@@ -1,5 +1,6 @@
-// Dungeons: old tunnels, vaults and sewers under the wasteland. Each is a
-// single entrance tile on the overworld; below are 2-4 levels, each a
+// Dungeons: old mines, bunkers and caverns dug into the mountain ranges. Each
+// is a single entrance tile on the overworld, a cave mouth at the foot of the
+// peaks; below are 5-9 levels, each a
 // labyrinth of rooms, doors and winding passageways, generated from the
 // dungeon's seed and the level (so only the seed, position and name need
 // saving). On every level but the last, stairs down wait in the room farthest
@@ -14,13 +15,15 @@
 // region into one (plus a few extra doors, so there's more than one way
 // round), then fill in most of the passages' dead ends.
 import type { BaseFile } from "./base.ts";
-import { rngFrom } from "./camps.ts";
+import { besideAny, rngFrom } from "./camps.ts";
 import { hash2 } from "./noise.ts";
 import { T } from "./tiles.ts";
 import { BASE, CHUNK_SIZE } from "./worldgen.ts";
 
-/** Chance that a newly generated chunk holds a dungeon entrance. */
-export const DUNGEON_CHANCE = 0.05;
+/** Chance that a newly generated chunk in the mountains holds a dungeon entrance. */
+export const DUNGEON_CHANCE = 0.12;
+/** A chunk needs at least this many mountain tiles to be in a range (rather than a lone peak). */
+export const DUNGEON_MIN_MOUNTAINS = 60;
 /** No entrances this close (tiles) to the base. */
 export const DUNGEON_MIN_BASE_DISTANCE = 30;
 /** Chance a door between two already-joined regions is opened anyway, making loops. */
@@ -34,29 +37,27 @@ const pick = <V>(rng: () => number, list: readonly V[]): V => list[Math.floor(rn
 const between = (rng: () => number, lo: number, hi: number) => lo + Math.floor(rng() * (hi - lo + 1));
 const odd = (n: number) => (n % 2 === 0 ? n + 1 : n);
 
-// Overworld terrain an entrance can sit on.
+// Overworld terrain an entrance can sit on (at the foot of the mountains).
 const DUNGEON_GROUND = new Set<number>([T.WASTELAND, T.SCRUB, T.RUBBLE, T.HILLS, T.DUNES, T.DEAD_FOREST, T.CRATER]);
+const MOUNTAIN = new Set<number>([T.MOUNTAINS]);
 
 /**
  * Where (local x, y) to put a dungeon entrance in a freshly generated chunk,
- * if it gets one: a walkable spot away from the base, and not `taken` (the
- * chunk's encampment, if any).
+ * if it gets one: only in a mountain range, on walkable ground right against
+ * the mountainside, away from the base, and not `taken` (the chunk's
+ * encampment, if any).
  */
 export function dungeonSpot(
   seed: number, cx: number, cy: number, tiles: Uint8Array, taken?: { lx: number; ly: number },
 ): { lx: number; ly: number } | undefined {
   if (hash2(seed + SALT.place, cx, cy) / 4294967296 >= DUNGEON_CHANCE) return undefined;
-  const rng = rngFrom(hash2(seed + SALT.spot, cx, cy));
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const lx = between(rng, 2, CHUNK_SIZE - 3);
-    const ly = between(rng, 2, CHUNK_SIZE - 3);
-    if (taken && Math.max(Math.abs(lx - taken.lx), Math.abs(ly - taken.ly)) < 3) continue;
-    const x = cx * CHUNK_SIZE + lx;
-    const y = cy * CHUNK_SIZE + ly;
-    if (Math.hypot(x - BASE.icon.x, y - BASE.icon.y) < DUNGEON_MIN_BASE_DISTANCE) return undefined;
-    if (DUNGEON_GROUND.has(tiles[ly * CHUNK_SIZE + lx]!)) return { lx, ly };
-  }
-  return undefined;
+  if (tiles.filter((t) => t === T.MOUNTAINS).length < DUNGEON_MIN_MOUNTAINS) return undefined;
+  const near = (s: { lx: number; ly: number }) => taken && Math.max(Math.abs(s.lx - taken.lx), Math.abs(s.ly - taken.ly)) < 3;
+  const mouths = besideAny(tiles, MOUNTAIN, DUNGEON_GROUND).filter((s) => !near(s));
+  if (!mouths.length) return undefined;
+  const spot = mouths[Math.floor(rngFrom(hash2(seed + SALT.spot, cx, cy))() * mouths.length)]!;
+  const far = Math.hypot(cx * CHUNK_SIZE + spot.lx - BASE.icon.x, cy * CHUNK_SIZE + spot.ly - BASE.icon.y) >= DUNGEON_MIN_BASE_DISTANCE;
+  return far ? spot : undefined;
 }
 
 /** The seed a dungeon's layout grows from. */
@@ -65,7 +66,7 @@ export function dungeonSeed(worldSeed: number, x: number, y: number): number {
 }
 
 const NAME_ADJ = ["Flooded", "Sunken", "Collapsed", "Buried", "Rusted", "Forgotten", "Silent", "Glowing", "Choked", "Black"];
-const NAME_PLACE = ["Metro Tunnels", "Bunker", "Vault", "Sewers", "Mine", "Fallout Shelter", "Catacombs", "Pump Works", "Cellars", "Pipeworks"];
+const NAME_PLACE = ["Mine", "Caverns", "Bunker", "Vault", "Fallout Shelter", "Mineshafts", "Missile Silo", "Grotto", "Catacombs", "Deep Workings"];
 
 export function dungeonName(worldSeed: number, x: number, y: number): string {
   const rng = rngFrom(hash2(worldSeed + SALT.name, x, y));
@@ -90,9 +91,9 @@ export interface DungeonFile extends BaseFile {
   up: [number, number][];
 }
 
-/** How many levels a dungeon has: 2 to 4. */
+/** How many levels a dungeon has: 5 to 9. */
 export function dungeonDepth(seed: number): number {
-  return 2 + ((seed >>> 0) % 3);
+  return 5 + ((seed >>> 0) % 5);
 }
 
 type Rect = { x: number; y: number; w: number; h: number };

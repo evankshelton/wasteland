@@ -48,7 +48,7 @@ const server = new GameServer(world, storage, BaseMap.load(), {
   saveIntervalMs: 5_000,
   tickMs: 250,
   monsters: DEFAULT_MONSTER_OPTIONS,
-  encounterRadius: 8,
+  encounterRadius: 3,
   encounterGraceMs: 3_000,
 });
 

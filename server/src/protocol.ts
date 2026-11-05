@@ -1,9 +1,11 @@
 // Wire protocol: one JSON object per WebSocket text message, discriminated by `t`.
 // Keep in sync with client/scripts/net.gd and docs/PROTOCOL.md.
 
+import type { BattleView } from "./battle.ts";
+import type { CardView } from "./cards.ts";
 import { ABILITIES, type Ability, type Character } from "./character.ts";
 
-export const PROTOCOL_VERSION = 10;
+export const PROTOCOL_VERSION = 13;
 
 /** Most chunk coordinates a client may ask for in one map_chunks request. */
 export const MAP_BATCH_MAX = 256;
@@ -23,17 +25,15 @@ export type ClientMsg =
   | { t: "move"; dir: Dir; seq: number }
   | { t: "map" }
   | { t: "map_chunks"; coords: [number, number][] }
-  | {
-      t: "encounter_end";
-      id: number;
-      result: EncounterResult;
-      /** Monsters whose whole pack was killed. */
-      killed: number[];
-      /** Monster id -> zombies still standing, for packs only partly killed. */
-      remaining?: Record<string, number>;
-      dir?: Dir;
-      hp?: number;
-    }
+  | { t: "battle_play"; id: number; uid: number; target?: number } // play a card (target: an enemy's id)
+  | { t: "battle_end_turn"; id: number; target?: number } // end your turn (target: the pack your allies attack)
+  | { t: "battle_pass"; id: number } // let the zombie move or reaction on top of the stack happen without answering
+  | { t: "battle_flee"; id: number }
+  | { t: "offer_pick"; index: number } // take card `index` of the offer shown, or -1 for none
+  | { t: "deck_set"; uid: number; deck: boolean } // move a card into the deck or out to the pack
+  | { t: "shop_buy"; npc: number; index: number }
+  | { t: "shop_sell"; npc: number; uid: number }
+  | { t: "shop_upgrade"; npc: number; uid: number }
   | { t: "enter" } // go into the base while standing on its icon
   | { t: "reroll" } // roll new abilities (only before accepting a character)
   | { t: "accept" } // keep the current roll and start playing
@@ -41,11 +41,31 @@ export type ClientMsg =
   | { t: "service"; npc: number }; // ask an NPC in the base for their service (talking to them does this)
 
 export type EncounterResult = "victory" | "fled" | "died";
-const RESULTS: readonly string[] = ["victory", "fled", "died"];
+
+/** A player's character as sent to them (their kit goes in "cards"). */
+export type PublicCharacter = Omit<Character, "kit">;
 
 // ---- server -> client ----
 export type ServerMsg =
-  | { t: "character"; character: Character }
+  | { t: "character"; character: PublicCharacter }
+  // Everything the player owns: scrap and every card, each in the deck or the pack.
+  | { t: "cards"; scrap: number; deckMin: number; deckMax: number; cards: CardView[] }
+  // A choice of cards (after levelling up, or loot after a fight): take one with offer_pick.
+  | { t: "offer"; reason: "level" | "loot"; cards: CardView[] }
+  // An NPC's shop: what they sell, what they'd pay for each of your cards, and what they'd charge to upgrade them.
+  | {
+      t: "shop";
+      npc: number;
+      name: string;
+      title: string;
+      buyLabel: string;
+      upgradeLabel: string;
+      stock: (CardView & { price: number })[];
+      sell: { uid: number; price: number }[];
+      upgrade: { uid: number; price: number; next: CardView }[];
+    }
+  // The state of the player's card battle, after every move.
+  | { t: "battle"; id: number; battle: BattleView }
   | {
       t: "welcome";
       id: number;
@@ -55,9 +75,11 @@ export type ServerMsg =
       y: number;
       chunkSize: number;
       tiles: { id: number; key: string; name: string; passable: boolean; color: string }[];
+      /** Every kind of monster: what it's called and its column in the client's sprites.png. */
+      monsters: { kind: string; name: string; one: string; many: string; sprite: number }[];
       motd: string;
       /** If not yet created, the client shows the rolling screen; nothing else is sent until "accept". */
-      character: Character;
+      character: PublicCharacter;
     }
   | { t: "chunk"; cx: number; cy: number; tiles: string } // base64, row-major bytes
   | { t: "you"; x: number; y: number; seq: number; ok: boolean }
@@ -69,17 +91,8 @@ export type ServerMsg =
   | { t: "map_batch_done" }
   | { t: "monster"; id: number; kind: string; count: number; x: number; y: number } // appeared in view or moved
   | { t: "monster_left"; id: number }
-  // A zombie reached the player: fight every enemy within `radius` tiles in first person.
-  // Enemy dx/dy are tile offsets from the player at (x, y).
-  | {
-      t: "encounter_start";
-      id: number;
-      x: number;
-      y: number;
-      radius: number;
-      seed: number;
-      enemies: { id: number; kind: string; count: number; dx: number; dy: number }[];
-    }
+  // A zombie reached the player: a card battle against every pack within the encounter radius.
+  | { t: "encounter_start"; id: number; x: number; y: number; battle: BattleView }
   | { t: "encounter_over"; id: number; result: EncounterResult; x: number; y: number }
   // Which map the player is on. Sent after welcome and whenever it changes;
   // x/y (and later "you" and "player" messages) are in that map's coordinates.
@@ -136,23 +149,31 @@ export function parseClientMsg(raw: string): ClientMsg | undefined {
       }
       return { t: "map_chunks", coords };
     }
-    case "encounter_end": {
-      if (typeof o.id !== "number" || typeof o.result !== "string" || !RESULTS.includes(o.result)) return undefined;
-      if (!Array.isArray(o.killed) || o.killed.length > 256 || !o.killed.every(Number.isSafeInteger)) return undefined;
-      if (o.dir !== undefined && (typeof o.dir !== "string" || !(o.dir in DIR_DELTA))) return undefined;
-      if (o.hp !== undefined && (typeof o.hp !== "number" || !Number.isFinite(o.hp))) return undefined;
-      let remaining: Record<string, number> | undefined;
-      if (o.remaining !== undefined) {
-        if (typeof o.remaining !== "object" || o.remaining === null || Array.isArray(o.remaining)) return undefined;
-        const entries = Object.entries(o.remaining as Record<string, unknown>);
-        if (entries.length > 256 || !entries.every(([, v]) => Number.isSafeInteger(v))) return undefined;
-        remaining = Object.fromEntries(entries) as Record<string, number>;
-      }
-      return {
-        t: "encounter_end", id: o.id, result: o.result as EncounterResult, killed: o.killed as number[],
-        remaining, dir: o.dir as Dir | undefined, hp: o.hp as number | undefined,
-      };
-    }
+    case "battle_play":
+      if (!Number.isSafeInteger(o.id) || !Number.isSafeInteger(o.uid)) return undefined;
+      if (o.target !== undefined && !Number.isSafeInteger(o.target)) return undefined;
+      return { t: "battle_play", id: o.id as number, uid: o.uid as number, target: o.target as number | undefined };
+    case "battle_end_turn":
+      if (!Number.isSafeInteger(o.id)) return undefined;
+      if (o.target !== undefined && !Number.isSafeInteger(o.target)) return undefined;
+      return { t: "battle_end_turn", id: o.id as number, target: o.target as number | undefined };
+    case "battle_pass":
+    case "battle_flee":
+      if (!Number.isSafeInteger(o.id)) return undefined;
+      return { t: o.t, id: o.id as number };
+    case "offer_pick":
+      if (!Number.isSafeInteger(o.index)) return undefined;
+      return { t: "offer_pick", index: o.index as number };
+    case "deck_set":
+      if (!Number.isSafeInteger(o.uid) || typeof o.deck !== "boolean") return undefined;
+      return { t: "deck_set", uid: o.uid as number, deck: o.deck };
+    case "shop_buy":
+      if (!Number.isSafeInteger(o.npc) || !Number.isSafeInteger(o.index)) return undefined;
+      return { t: "shop_buy", npc: o.npc as number, index: o.index as number };
+    case "shop_sell":
+    case "shop_upgrade":
+      if (!Number.isSafeInteger(o.npc) || !Number.isSafeInteger(o.uid)) return undefined;
+      return { t: o.t, npc: o.npc as number, uid: o.uid as number };
     case "reroll":
     case "accept":
       return { t: o.t };

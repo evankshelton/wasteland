@@ -41,6 +41,8 @@ export const T = {
   CRATER: id("crater"),
   RADIATION: id("radiation"),
   WATER: id("water"),
+  DEEP_WATER: id("deep_water"),
+  BRIDGE: id("bridge"),
   SWAMP: id("swamp"),
   DUNES: id("dunes"),
   BASE_WALL: id("base_wall"),

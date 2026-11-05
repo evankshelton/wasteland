@@ -8,9 +8,9 @@ const MENU_SCENE := "res://scenes/main_menu.tscn"
 
 ## [key in the character, label, what it does]
 const ABILITIES := [
-	["str", "Strength", "Damage with every shot."],
-	["dex", "Dexterity", "How fast you shoot and run."],
-	["int", "Intelligence", "Bonus experience from everything you do."],
+	["str", "Strength", "Every attack card hits harder."],
+	["dex", "Dexterity", "Every Block card blocks more."],
+	["int", "Intelligence", "Bonus experience; at 16+, an extra card each turn."],
 	["maxHp", "Hit Points", "How much punishment you can take."],
 ]
 

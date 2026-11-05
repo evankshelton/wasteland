@@ -1,14 +1,20 @@
-// Radioactive zombies: spawned around players out in the wasteland or down in
-// a dungeon, they shamble one tile at a time towards the nearest player.
+// Monsters: radioactive zombies, raiders, feral hounds, ghouls, rat swarms and
+// cave crawlers (shared/enemies.json). Spawned around players out in the
+// wasteland or down in a dungeon, each one a group of its kind, they head one
+// tile at a time towards the nearest player (hounds quickly, ghouls slowly).
 // Stepping onto a player's tile is a "contact", which the game server turns
-// into an encounter. They never enter the base. Zombies are transient: they
+// into an encounter. They never enter the base. Monsters are transient: they
 // despawn when nobody is around and are not persisted across server restarts.
 //
-// A Monsters is one map's zombies; what they can walk on, where they may
+// What turns up depends on where: raiders by the roads and ruins, hounds in
+// the scrub, ghouls in the hot zones, rats and crawlers underground.
+//
+// A Monsters is one map's monsters; what they can walk on, where they may
 // appear, and how they find their way comes from its Ground (the overworld's,
 // or a dungeon's, where they path through the passages rather than shamble).
 import type { BaseMap } from "./base.ts";
-import { T, isPassable } from "./tiles.ts";
+import { enemy, pickKind } from "./enemies.ts";
+import { T, TILE_DEFS, isPassable } from "./tiles.ts";
 import type { World } from "./world.ts";
 import { BASE } from "./worldgen.ts";
 
@@ -22,7 +28,13 @@ export interface Ground {
   favoured(x: number, y: number): boolean;
   /** Find a real path to the player through the walls, rather than shambling straight at them. */
   pathfind: boolean;
+  /** Underground: dungeon monsters turn up here. */
+  dungeon: boolean;
+  /** The terrain key of a tile (some monsters favour some ground). */
+  key(x: number, y: number): string;
 }
+
+const KEY_OF = new Map(TILE_DEFS.map((t) => [t.id, t.key]));
 
 /** The wasteland: anything passable, but not by the base or onto a camp or dungeon entrance. */
 export function overworldGround(world: World): Ground {
@@ -34,6 +46,8 @@ export function overworldGround(world: World): Ground {
     quiet: (x, y) => Math.hypot(x, y) < BASE.clearRadius,
     favoured: (x, y) => world.tileAt(x, y) === T.RADIATION,
     pathfind: false,
+    dungeon: false,
+    key: (x, y) => KEY_OF.get(world.tileAt(x, y)) ?? "",
   };
 }
 
@@ -49,15 +63,16 @@ export function dungeonGround(site: BaseMap): Ground {
     quiet: (x, y) => nearHaven(x, y, 5),
     favoured: () => false,
     pathfind: true,
+    dungeon: true,
+    key: () => "cave_floor",
   };
 }
 
-export type MonsterKind = "zombie";
-
 export interface Monster {
   id: number;
-  kind: MonsterKind;
-  /** How many zombies this one stands for in a first-person fight (a pack of 1-15). */
+  /** Which enemy it is (a kind in shared/enemies.json). */
+  kind: string;
+  /** How many of them this one stands for in a battle (a pack of zombies, a gang of raiders...). */
   count: number;
   x: number;
   y: number;
@@ -70,6 +85,13 @@ export interface Monster {
  * staying high, so most packs are big (about 8 on average) and small ones are rare.
  */
 export const PACK_SIZE_WEIGHTS = [3, 4, 5, 6, 7, 8, 8, 8, 8, 7, 7, 6, 6, 5, 5] as const;
+
+/** How many turn up together: zombies by PACK_SIZE_WEIGHTS, the rest anywhere in their kind's size range. */
+export function rollGroupSize(kind: string, rng: () => number = Math.random): number {
+  const size = enemy(kind).size;
+  if (!size) return rollPackSize(rng);
+  return size[0] + Math.floor(rng() * (size[1] - size[0] + 1));
+}
 
 export function rollPackSize(rng: () => number = Math.random): number {
   const total = PACK_SIZE_WEIGHTS.reduce((a, b) => a + b, 0);
@@ -200,8 +222,9 @@ export class Monsters {
       if (near >= o.maxNearPlayer) continue;
       const spot = this.findSpawn(p, players);
       if (!spot) continue;
+      const kind = pickKind(this.ground.dungeon, this.ground.key(spot.x, spot.y), this.rng);
       const m: Monster = {
-        id: Monsters.nextId++, kind: "zombie", count: Math.min(o.maxPack, rollPackSize(this.rng)), ...spot,
+        id: Monsters.nextId++, kind, count: Math.min(o.maxPack, rollGroupSize(kind, this.rng)), ...spot,
         nextStepAt: now + o.stepMs, lastNearPlayerAt: now,
       };
       this.all.set(m.id, m);
@@ -211,7 +234,7 @@ export class Monsters {
     const contacted = new Set<number>();
     for (const m of this.all.values()) {
       if (now < m.nextStepAt) continue;
-      m.nextStepAt = now + o.stepMs;
+      m.nextStepAt = now + o.stepMs * enemy(m.kind).speed;
       let target: PlayerPos | undefined;
       for (const p of targets) {
         if (contacted.has(p.id)) continue;

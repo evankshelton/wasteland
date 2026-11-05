@@ -147,7 +147,7 @@
       ],
       "lines": [
         "Pipe rifles, scatterguns, the odd laser if a scav gets lucky.",
-        "Everything's caps, up front. Trading opens once the supply runs are sorted."
+        "Everything's scrap, up front. Have a look at what's on the rack."
       ]
     },
     {
@@ -161,7 +161,7 @@
       ],
       "lines": [
         "Leather, scrap plate, a riot suit if you're feeling rich.",
-        "Can't sell you any yet. Come back when the ledger's working."
+        "Scrap on the counter and it's yours. Have a look."
       ]
     },
     {
@@ -189,7 +189,7 @@
       ],
       "lines": [
         "You're glowing. Literally. Into the showers.",
-        "Rad scrubbing comes online when the counters start measuring what you've soaked up."
+        "Rad-Away and the like on the shelf. Scrap up front."
       ]
     },
     {
@@ -210,26 +210,28 @@
       "id": 6,
       "name": "Sgt. Okafor",
       "role": "Barracks",
-      "service": "rest",
+      "service": "training",
       "pos": [
         6,
         13
       ],
       "lines": [
-        "Bunks are for people who made it back. Grab one."
+        "Bunks are for people who made it back.",
+        "Want to make it back more often? I'll drill you. Costs scrap."
       ]
     },
     {
       "id": 7,
       "name": "Tully",
       "role": "Depot Clerk",
-      "service": "storage",
+      "service": "trade",
       "pos": [
         26,
         13
       ],
       "lines": [
-        "Every crate's counted twice. If it's yours, it'll be here when you get back. Eventually."
+        "Every crate's counted twice.",
+        "Got gear you don't need? I pay fair. Fairer than Rourke, anyway."
       ]
     },
     {

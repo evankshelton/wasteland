@@ -1,4 +1,5 @@
 // Character abilities, experience and levels. All rolls happen on the server.
+import type { Kit } from "./cards.ts";
 
 export type Ability = "str" | "dex" | "int" | "hp";
 export const ABILITIES: readonly Ability[] = ["str", "dex", "int", "hp"];
@@ -17,6 +18,8 @@ export interface Character {
   hp: number;
   /** Level-up points not yet spent on an ability. */
   points: number;
+  /** Scrap, cards and card choices (cards.ts). Saved with the character, sent separately. */
+  kit?: Kit;
 }
 
 export const ABILITY_MIN = 6;
@@ -25,7 +28,7 @@ export const ABILITY_MAX = 100;
 export const RAISE_BY = 2;
 
 /** Experience for things players do. */
-export const XP = { kill: 25, victory: 10, explore: 2 } as const;
+export const XP = { kill: 25, victory: 10 } as const;
 
 /**
  * A fresh level 1 character. Strength, dexterity and intelligence are

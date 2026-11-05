@@ -7,8 +7,10 @@ extends Node
 ##
 ## --expect-base plays a brand-new character (random name unless --name is
 ## given): it must start inside the base, talk to the gate guard with the enter
-## key, walk out of the south gate, step back onto the base icon, enter again
-## with the enter key, and leave once more before the usual checks.
+## key, walk to the quartermaster and open his shop (buying a card if it can
+## afford one), open the inventory, walk out of the south gate, step back onto
+## the base icon, enter again with the enter key, and leave once more before
+## the usual checks.
 ##
 ## --expect-camp plays a brand-new character against a server that puts the
 ## player on an encampment's icon the first time they leave the base: it must
@@ -24,13 +26,15 @@ extends Node
 ## again), and leave by the stairs out of the bottom.
 ##
 ## --expect-encounter also waits for zombies to catch the player, checks the
-## first-person arena, shoots a zombie, wins that fight, then waits for another
-## and flees across the arena's edge. Needs a server with a high zombie spawn
-## chance and the player far enough from the base for zombies to spawn.
+## card battle was dealt, plays it out to a win (with the number keys' play
+## path), takes a card from the loot offer, looks at the inventory, then waits
+## for another fight and flees it. Needs a server with a high zombie spawn
+## chance and the player far enough from the base for zombies to spawn (and,
+## for the fights to be won reliably, characters with plenty of hit points).
 ##
 ## Without --headless it also saves screenshots (--screenshot <path>; the map
-## view goes to <path> with "_map" before the extension, the fight to "_fps",
-## the base to "_base", the camp to "_camp", the dungeon to "_dungeon").
+## view goes to <path> with "_map" before the extension, the battle to "_battle",
+## the base to "_base", the shop to "_shop", the camp to "_camp", the dungeon to "_dungeon").
 
 const GAME_SCENE := preload("res://scenes/game.tscn")
 const CREATION_SCENE := preload("res://scenes/character_creation.tscn")
@@ -43,6 +47,7 @@ var expect_encounter := false
 var expect_base := false
 var expect_camp := false
 var expect_dungeon := false
+var _answered := false ## printed the first time a fight answers a zombie move with a Reaction
 
 
 func _ready() -> void:
@@ -158,6 +163,46 @@ func _test_base(game: Node) -> String:
 		_send_action(&"enter")
 		await get_tree().process_frame
 
+	# Over to the quartermaster: talking to him opens his shop.
+	var shopkeeper := {}
+	for n: Dictionary in game.npcs.values():
+		if n.service == "weapons":
+			shopkeeper = n
+	var at := Vector2i(int(shopkeeper.x), int(shopkeeper.y))
+	await _walk_to(game, func(t: Vector2i) -> bool:
+		for d: Vector2i in [Vector2i.UP, Vector2i.DOWN, Vector2i.LEFT, Vector2i.RIGHT]:
+			if t + d == at or (t + d * 2 == at and game.tile_at(t + d) == game._counter_id):
+				return true
+		return false)
+	_send_action(&"enter")
+	if not await _wait_until(func() -> bool: return game.cards_ui.mode == "shop"):
+		return "talking to %s at %s didn't open a shop" % [shopkeeper.name, game.pos]
+	var shop: Dictionary = game.cards_ui.shop
+	var scrap := int(game.cards_info.scrap)
+	print("%s's shop: %s" % [shop.name, ", ".join(shop.stock.map(func(c: Dictionary) -> String: return "%s (%d)" % [c.name, c.price]))])
+	for i in shop.stock.size():
+		if int(shop.stock[i].price) <= scrap:
+			Net.send({"t": "shop_buy", "npc": int(shop.npc), "index": i})
+			if not await _wait_until(func() -> bool: return int(game.cards_info.scrap) == scrap - int(shop.stock[i].price)):
+				return "buying %s didn't take the scrap" % shop.stock[i].name
+			print("bought %s, %d scrap left" % [shop.stock[i].name, int(game.cards_info.scrap)])
+			break
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_shop." + screenshot.get_extension())
+	_send_action(&"ui_cancel")
+	await get_tree().process_frame
+	_send_action(&"inventory")
+	await get_tree().process_frame
+	if game.cards_ui.mode != "inventory":
+		return "the inventory key didn't open the inventory"
+	_send_action(&"inventory")
+	await get_tree().process_frame
+	if game.cards_ui.is_open():
+		return "the inventory key didn't close the inventory"
+	await _walk_to(game, func(t: Vector2i) -> bool: return t == entry)
+	if game.pos != entry:
+		return "couldn't walk back to the entrance from the shop (at %s)" % game.pos
+
 	# Out through the south gate: gate, road, road, off the edge.
 	await _steps(game, &"move_down", 4)
 	if game.location != "overworld" or game.pos != Vector2i(0, 1):
@@ -266,22 +311,17 @@ func _test_dungeon(game: Node) -> String:
 	# Away from the ladder (zombies leave you be beside it) until something finds us.
 	var far := func(t: Vector2i) -> bool: return maxi(absi(t.x - ladder.x), absi(t.y - ladder.y)) >= 8
 	await _walk_to(game, far)
-	var enc: Node3D = await _wait_for_encounter(game)
+	var enc: BattleScreen = await _wait_for_encounter(game)
 	if enc == null:
 		return "nothing came for us in the dungeon"
-	if not enc.underground or enc.sun.visible:
-		return "the fight isn't underground"
-	print("dungeon fight at %s: %d zombie(s)" % [game.pos, enc.enemies.size()])
-	await get_tree().create_timer(1.0).timeout
+	if not enc.state.terrain.has("cave_in"):
+		return "the tunnels didn't give a cave-in card (terrain cards: %s)" % [enc.state.terrain]
+	print("dungeon fight at %s: %d pack(s), terrain cards %s" % [game.pos, enc.state.enemies.size(), enc.state.terrain])
 	if not screenshot.is_empty():
-		await _screenshot(screenshot.get_basename() + "_dungeon_fps." + screenshot.get_extension())
-		enc.player.rotate_y(PI)
-		await get_tree().create_timer(0.2).timeout
-		await _screenshot(screenshot.get_basename() + "_dungeon_fps2." + screenshot.get_extension())
-	for e: Zombie3D in enc.enemies.values():
-		e.hit(1000.0)
-	if not await _wait_for_result(game, "victory"):
-		return "dungeon victory was not confirmed (got '%s')" % game.last_encounter_result
+		await _screenshot(screenshot.get_basename() + "_dungeon_battle." + screenshot.get_extension())
+	var won := await _fight(game, "win")
+	if won != "victory":
+		return "the dungeon fight ended in '%s', not a win" % won
 	if game.location != "dungeon":
 		return "left the dungeon after the fight (now in the %s)" % game.location
 
@@ -290,14 +330,16 @@ func _test_dungeon(game: Node) -> String:
 	var shot := false
 	var climbed := false
 	var level2_seen := {} ## level 2's explored tiles as we left it, to check nothing extra appears when we return
-	for leg in 60:
+	for leg in 300: # (dungeons run to 9 levels, with fights on the way)
 		if game.location == "overworld":
 			break
 		if game.encounter:
-			for e: Zombie3D in game.encounter.enemies.values():
-				e.hit(1000.0)
-			if not await _wait_for_result(game, "victory"):
-				return "a fight on the way down wasn't won (got '%s')" % game.last_encounter_result
+			var result := await _fight(game, "win")
+			if result != "victory":
+				return "a fight on the way down wasn't won (got '%s')" % result
+			continue
+		if game.cards_ui.is_open():
+			await _settle(game)
 			continue
 		if game.site_info.name != level:
 			level = game.site_info.name
@@ -349,7 +391,7 @@ func _walk_to(game: Node, goal: Callable) -> void:
 			if goal.call(next):
 				path = came_from[at] + [action]
 				break
-			if game.tile_passable[tile] and not game.tile_names[tile] in ["Ladder Up", "Stairs Down", "Stairs to the Surface", "Stairs Up"]:
+			if game.tile_passable[tile] and not game.npcs.has(next) and not game.tile_names[tile] in ["Ladder Up", "Stairs Down", "Stairs to the Surface", "Stairs Up"]:
 				came_from[next] = came_from[at] + [action]
 				queue.append(next)
 	for action: StringName in path:
@@ -379,63 +421,71 @@ func _wait_until(condition: Callable, timeout_ms := 5000) -> bool:
 
 func _test_encounters(game: Node) -> String:
 	# 1. Stand still until a zombie catches us.
-	var enc: Node3D = await _wait_for_encounter(game)
+	var enc: BattleScreen = await _wait_for_encounter(game)
 	if enc == null:
 		return "no zombie reached the player"
-	var center: Vector2i = game.pos
-	var terrain := {}
-	for key: String in enc._cells.values():
-		terrain[key] = terrain.get(key, 0) + 1
-	print("encounter at %s: %d zombie(s), %d arena nodes, terrain %s" % [center, enc.enemies.size(), enc.arena.get_child_count(), terrain])
-	if enc.player.global_position.y > 0.5:
-		return "player is standing on something at %s" % enc.player.global_position
-	if enc.enemies.is_empty() or enc.arena.get_child_count() < 3:
-		return "arena not built"
+	var hand: Array = enc.state.hand
+	print("battle at %s: %d pack(s), %d cards in hand, terrain cards %s" % [game.pos, enc.state.enemies.size(), hand.size(), enc.state.terrain])
+	if hand.size() < 5 or enc.state.enemies.is_empty():
+		return "the battle wasn't dealt"
 	if game.terrain.visible:
-		return "overworld still showing during the fight"
-	await get_tree().create_timer(1.0).timeout
-	if DisplayServer.get_name() != "headless":
-		await get_tree().create_timer(2.0).timeout
-		print("rendering the fight: %d fps, %d draw calls, process %.1f ms, physics %.1f ms" % [
-			Engine.get_frames_per_second(), Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
-			Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0])
+		return "overworld still showing during the battle"
 	if not screenshot.is_empty():
-		await _screenshot(screenshot.get_basename() + "_fps." + screenshot.get_extension())
-		enc.player.rotate_y(PI) # ...and the view behind.
-		await get_tree().create_timer(0.2).timeout
-		await _screenshot(screenshot.get_basename() + "_fps2." + screenshot.get_extension())
+		await get_tree().create_timer(0.3).timeout
+		await _screenshot(screenshot.get_basename() + "_battle." + screenshot.get_extension())
+	# The marked group's cards, as C shows them.
+	enc.show_foe_cards(true)
+	var shown := enc._foe_cards.size()
+	print("%s plays %d cards" % [enc._enemy(enc.target).name, shown])
+	if shown < 4:
+		return "the enemy's cards didn't show"
+	if not screenshot.is_empty():
+		await get_tree().create_timer(0.3).timeout
+		await _screenshot(screenshot.get_basename() + "_foecards." + screenshot.get_extension())
+	enc.show_foe_cards(false)
 
-	# 2. Step up to a zombie and shoot it for real (hitscan through the physics world).
-	var z: Zombie3D = enc.enemies.values()[0]
-	var away := -z.global_position.normalized() if z.global_position.length() > 0.1 else Vector3.BACK
-	enc.player.global_position = z.global_position + away * 3.0
-	await get_tree().physics_frame
-	await get_tree().physics_frame
-	_aim(enc, z)
-	enc.fire()
-	if z.health >= Zombie3D.MAX_HEALTH:
-		return "shot at point blank did not hit the zombie"
-	print("shot zombie #%d: health %d" % [z.monster_id, z.health])
+	# 2. Play a card the way the number keys do, and see the server take it.
+	var slot := -1
+	for i in hand.size():
+		if bool(hand[i].playable) and int(hand[i].cost) > 0:
+			slot = i
+			break
+	if slot >= 0:
+		var energy := int(enc.state.player.energy)
+		enc.play_slot(slot)
+		if not await _wait_until(func() -> bool: return not enc._waiting):
+			return "the server never answered a card being played"
+		if int(enc.state.player.energy) >= energy:
+			return "playing a card didn't spend any energy"
+		print("played %s: energy %d -> %d" % [hand[slot].name, energy, int(enc.state.player.energy)])
 
-	# 3. Finish them all: victory.
+	# 3. Fight it out: victory, then the spoils.
 	var xp_before := int(Net.character.xp)
-	for e: Zombie3D in enc.enemies.values():
-		e.hit(1000.0)
-	if not await _wait_for_result(game, "victory"):
-		return "victory was not confirmed by the server (got '%s')" % game.last_encounter_result
+	var owned: int = game.cards_info.cards.size()
+	var result := await _fight(game, "win", false)
+	if result != "victory":
+		return "the fight ended in '%s', not a win" % result
 	if not game.terrain.visible:
-		return "overworld not restored after the fight"
-	await get_tree().process_frame
+		return "overworld not restored after the battle"
 	var earned := int(Net.character.xp) - xp_before
 	print("victory at %s: +%d XP, %s" % [game.pos, earned, game._vitals(Net.character)])
 	if earned < 35:
 		return "a victory with kills earned only %d XP" % earned
+	if not await _wait_until(func() -> bool: return game.cards_ui.mode == "offer"):
+		return "no loot offered after the win"
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_loot." + screenshot.get_extension())
+	game.cards_ui.pick(0)
+	if not await _wait_until(func() -> bool: return game.cards_info.cards.size() == owned + 1):
+		return "taking the loot didn't add a card"
+	await _settle(game)
+	game.cards_ui.open_inventory()
+	await get_tree().process_frame
+	if not screenshot.is_empty():
+		await _screenshot(screenshot.get_basename() + "_inventory." + screenshot.get_extension())
+	game.cards_ui.close()
 	if int(Net.character.points) > 0:
-		# Levelled up: the panel offers the abilities; key 1 raises strength by 2.
-		await get_tree().process_frame
-		if not game.level_up.visible:
-			return "reached level %d but no level-up choice appeared" % Net.character.level
-		await _screenshot(screenshot.get_basename() + "_levelup." + screenshot.get_extension()) if not screenshot.is_empty() else null
+		# Levelled up: key 1 on the level-up panel raises strength by 2.
 		var str_before := int(Net.character.str)
 		var key := InputEventKey.new()
 		key.physical_keycode = KEY_1
@@ -446,21 +496,21 @@ func _test_encounters(game: Node) -> String:
 			return "pressing 1 on the level-up panel didn't raise strength"
 		print("level %d: raised strength %d -> %d" % [Net.character.level, str_before, Net.character.str])
 
-	# 4. Next fight: run for it, east.
+	# 4. Next fight: run for it.
 	enc = await _wait_for_encounter(game)
 	if enc == null:
 		return "no second encounter"
-	center = game.pos
-	enc.player.global_position = Vector3(enc.half_extent + 1.0, enc.height_at(enc.half_extent + 1.0, 0.0) + 0.5, 0.0)
-	if not await _wait_for_result(game, "fled"):
-		return "fleeing was not confirmed by the server (got '%s')" % game.last_encounter_result
+	var center: Vector2i = game.pos
+	result = await _fight(game, "flee")
+	if result != "fled":
+		return "fleeing ended in '%s'" % result
 	print("fled from %s to %s" % [center, game.pos])
-	if game.pos.y != center.y or game.pos.x < center.x:
-		return "fled east but came out at %s" % game.pos
+	if game.pos == center:
+		return "fled but stayed put at %s" % center
 	return ""
 
 
-func _wait_for_encounter(game: Node) -> Node3D:
+func _wait_for_encounter(game: Node) -> BattleScreen:
 	var deadline := Time.get_ticks_msec() + 45000
 	while game.encounter == null:
 		if Time.get_ticks_msec() > deadline:
@@ -468,6 +518,55 @@ func _wait_for_encounter(game: Node) -> Node3D:
 		await get_tree().process_frame
 	await get_tree().process_frame
 	return game.encounter
+
+
+## Play the battle on screen to the end, the way a player would: "win" plays
+## the best card it can afford (attacks first, at the marked pack) or ends the
+## turn, and when the zombies wait on an answer, plays a Reaction or passes;
+## "flee" runs. Waits for the server's verdict and for the map to come
+## back, then deals with any card offers. Returns the result.
+func _fight(game: Node, mode: String, settle := true) -> String:
+	game.last_encounter_result = ""
+	var b: BattleScreen = game.encounter
+	var deadline := Time.get_ticks_msec() + 90000
+	while game.last_encounter_result.is_empty():
+		if Time.get_ticks_msec() > deadline:
+			return "timeout"
+		if is_instance_valid(b) and not b._waiting and b.state.get("over") == null:
+			if mode == "flee":
+				if b.responding():
+					b.pass_priority()
+				else:
+					b.flee()
+			else:
+				var hand: Array = b.state.hand
+				var pick := -1
+				for i in hand.size():
+					if bool(hand[i].playable) and (pick < 0 or hand[i].type == "attack" and hand[pick].type != "attack"):
+						pick = i
+				if pick >= 0:
+					if b.responding() and not _answered:
+						_answered = true
+						print("answered the zombies with %s" % hand[pick].name)
+						if not screenshot.is_empty():
+							await _screenshot(screenshot.get_basename() + "_answer." + screenshot.get_extension())
+					b.play_slot(pick)
+				else:
+					b.end_turn() # (a pass, when the zombies are waiting on an answer)
+		await get_tree().process_frame
+	var result: String = game.last_encounter_result
+	await _wait_until(func() -> bool: return game.encounter == null)
+	if settle:
+		await _settle(game)
+	return result
+
+
+## Take the first card of every card offer waiting (level-ups, loot).
+func _settle(game: Node) -> void:
+	await get_tree().create_timer(0.3).timeout
+	while game.cards_ui.mode == "offer":
+		game.cards_ui.pick(0)
+		await get_tree().create_timer(0.3).timeout
 
 
 func _wait_for_result(game: Node, want: String) -> bool:
@@ -478,15 +577,6 @@ func _wait_for_result(game: Node, want: String) -> bool:
 			return false
 		await get_tree().process_frame
 	return game.last_encounter_result == want
-
-
-## Point the player's camera at a zombie's chest.
-func _aim(enc: Node3D, z: Zombie3D) -> void:
-	var eye: Vector3 = enc.camera.global_position
-	var chest := z.global_position + Vector3(0, 1.1, 0)
-	var to := chest - eye
-	enc.player.rotation.y = atan2(-to.x, -to.z)
-	enc.camera.rotation.x = atan2(to.y, Vector2(to.x, to.z).length())
 
 
 func _join() -> Node:

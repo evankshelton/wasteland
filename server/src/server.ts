@@ -2,14 +2,22 @@
 // movement authoritatively and streams nearby chunks and players.
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
-import { DIR_DELTA, PROTOCOL_VERSION, parseClientMsg, validName, type ClientMsg, type ServerMsg } from "./protocol.ts";
-import { BaseMap } from "./base.ts";
+import { DIR_DELTA, PROTOCOL_VERSION, parseClientMsg, validName, type ClientMsg, type Dir, type EncounterResult, type ServerMsg } from "./protocol.ts";
+import { BaseMap, type Npc } from "./base.ts";
+import { Battle, membersLeft } from "./battle.ts";
+import { ENEMIES, enemy } from "./enemies.ts";
+import {
+  DECK_MAX, DECK_MIN, MAX_LEVEL, addCard, card, deckSize, levelOffer, lootOffer, price, sellPrice, shopKind, shopStock,
+  starterKit, terrainCards, updateKit, upgradeCost, view, type Kit,
+} from "./cards.ts";
+import { hash2 } from "./noise.ts";
 import { campLayout } from "./camps.ts";
 import { dungeonDepth, dungeonLayout } from "./dungeons.ts";
 import { XP, gainXp, raise, rollCharacter, type Character } from "./character.ts";
 import { DUNGEON_MONSTER_OPTIONS, Monsters, dungeonGround, type Monster, type MonsterOptions } from "./monsters.ts";
 import type { Location, Storage } from "./storage.ts";
 import { T, TILE_DEFS, isPassable } from "./tiles.ts";
+import { rngFrom } from "./camps.ts";
 import { chunkOf, type World } from "./world.ts";
 import { BASE, CHUNK_SIZE } from "./worldgen.ts";
 
@@ -27,7 +35,7 @@ export interface ServerOptions {
   /** Milliseconds between monster updates. */
   tickMs: number;
   monsters: MonsterOptions;
-  /** Enemies within this many tiles of a contact join the encounter; the 3D arena spans it. */
+  /** Zombie packs within this many tiles of a contact join the battle. */
   encounterRadius: number;
   /** After an encounter, zombies leave the player alone for this long. */
   encounterGraceMs: number;
@@ -40,6 +48,7 @@ interface Encounter {
   x: number;
   y: number;
   enemies: Monster[];
+  battle: Battle;
 }
 
 interface Session {
@@ -178,8 +187,19 @@ export class GameServer {
         return this.onMap(s);
       case "map_chunks":
         return this.onMapChunks(s, msg);
-      case "encounter_end":
-        return this.onEncounterEnd(s, msg);
+      case "battle_play":
+      case "battle_end_turn":
+      case "battle_pass":
+      case "battle_flee":
+        return this.onBattle(s, msg);
+      case "offer_pick":
+        return this.onOfferPick(s, msg.index);
+      case "deck_set":
+        return this.onDeckSet(s, msg.uid, msg.deck);
+      case "shop_buy":
+      case "shop_sell":
+      case "shop_upgrade":
+        return this.onShop(s, msg);
       case "enter":
         return this.onEnter(s);
       case "reroll":
@@ -238,6 +258,12 @@ export class GameServer {
       char = rollCharacter();
       this.storage.saveCharacter(rec.id, char);
     }
+    if (char.created && !char.kit) {
+      char.kit = starterKit(); // From before cards existed: everyone gets the starting deck.
+      this.storage.saveCharacter(rec.id, char);
+    } else if (char.kit && updateKit(char.kit)) {
+      this.storage.saveCharacter(rec.id, char);
+    }
     s.player = { id: rec.id, name: rec.name, ...pos, char };
     this.byPlayerId.set(rec.id, s);
     const { x, y } = s.player;
@@ -253,14 +279,17 @@ export class GameServer {
       y,
       chunkSize: CHUNK_SIZE,
       tiles: TILE_DEFS.map(({ id, key, name, passable, color }) => ({ id, key, name, passable, color })),
+      monsters: [...ENEMIES.values()].map(({ kind, name, one, many, sprite }) => ({ kind, name, one, many, sprite })),
       motd: this.opts.motd,
-      character: char,
+      character: publicCharacter(char),
     });
     if (char.created) this.enterWorld(s);
   }
 
   /** Put a player with a finished character into the world they left. */
   private enterWorld(s: Session): void {
+    this.sendCards(s);
+    this.sendOffer(s);
     this.sendLocation(s);
     if (s.player!.loc === "overworld") this.streamChunks(s);
     this.updateVisibility(s);
@@ -279,6 +308,7 @@ export class GameServer {
     const p = s.player;
     if (!p || p.char.created) return;
     p.char.created = true;
+    p.char.kit = starterKit();
     this.storage.saveCharacter(p.id, p.char);
     const c = p.char;
     log(`[player] "${p.name}" accepted STR ${c.str} DEX ${c.dex} INT ${c.int} HP ${c.maxHp}`);
@@ -293,13 +323,20 @@ export class GameServer {
     this.sendCharacter(s);
   }
 
-  /** Talking to an NPC: the ones with a working service do it. */
-  private onService(s: Session, npcId: number): void {
+  /** The NPC with this id in the player's site, if they're in reach (next to them, or across a counter). */
+  private npcInReach(s: Session, npcId: number): Npc | undefined {
     const p = s.player;
-    if (!p || p.loc === "overworld") return;
+    if (!p || p.loc === "overworld" || s.encounter) return undefined;
     const npc = this.siteOf(p.loc)?.npcs.find((n) => n.id === npcId);
-    // In reach: next to them, or across a counter.
-    if (!npc || Math.abs(npc.x - p.bx) + Math.abs(npc.y - p.by) > 2) return;
+    return npc && Math.abs(npc.x - p.bx) + Math.abs(npc.y - p.by) <= 2 ? npc : undefined;
+  }
+
+  /** Talking to an NPC: the ones with a working service do it, and shopkeepers open their shop. */
+  private onService(s: Session, npcId: number): void {
+    const p = s.player!;
+    const npc = this.npcInReach(s, npcId);
+    if (!npc) return;
+    if (shopKind(npc.service)) this.sendShop(s, npc);
     if (npc.service === "healing") {
       if (p.char.hp >= p.char.maxHp) {
         this.send(s, { t: "notice", text: `${npc.name}: "You're in one piece. Go on."` });
@@ -321,13 +358,138 @@ export class GameServer {
     if (why) this.send(s, { t: "notice", text: `+${gained} XP (${why}).` });
     if (levels > 0) {
       log(`[player] "${p.name}" reached level ${p.char.level}`);
-      this.send(s, { t: "notice", text: `You reached level ${p.char.level}! Choose an ability to raise.` });
+      this.send(s, { t: "notice", text: `You reached level ${p.char.level}! Choose an ability to raise, and a new ability card.` });
+      for (let i = 0; i < levels; i++) this.kit(s).offers.push(levelOffer(Math.random));
+      this.storage.saveCharacter(p.id, p.char);
+      this.sendOffer(s);
     }
     this.sendCharacter(s);
   }
 
   private sendCharacter(s: Session): void {
-    this.send(s, { t: "character", character: s.player!.char });
+    this.send(s, { t: "character", character: publicCharacter(s.player!.char) });
+  }
+
+  // ---- cards: the kit, offers, shops ----
+
+  private kit(s: Session): Kit {
+    const c = s.player!.char;
+    return (c.kit ??= starterKit());
+  }
+
+  private saveKit(s: Session): void {
+    this.storage.saveCharacter(s.player!.id, s.player!.char);
+  }
+
+  private sendCards(s: Session): void {
+    const kit = this.kit(s);
+    this.send(s, {
+      t: "cards", scrap: kit.scrap, deckMin: DECK_MIN, deckMax: DECK_MAX,
+      cards: kit.cards.map((c) => ({ ...view(c.card, c.level), uid: c.uid, deck: c.deck })),
+    });
+  }
+
+  /** Show the first card choice waiting for the player, if any. */
+  private sendOffer(s: Session): void {
+    const offer = this.kit(s).offers[0];
+    if (offer) this.send(s, { t: "offer", reason: offer.reason, cards: offer.cards.map((c) => view(c.card, c.level)) });
+  }
+
+  private onOfferPick(s: Session, index: number): void {
+    const kit = this.kit(s);
+    const offer = kit.offers.shift();
+    if (!offer) return;
+    const pick = offer.cards[index];
+    if (pick) {
+      const owned = addCard(kit, pick.card, pick.level);
+      this.send(s, { t: "notice", text: `${view(pick.card, pick.level).name} added to your ${owned.deck ? "deck" : "pack"}.` });
+    }
+    this.saveKit(s);
+    this.sendCards(s);
+    this.sendOffer(s);
+  }
+
+  private onDeckSet(s: Session, uid: number, deck: boolean): void {
+    const kit = this.kit(s);
+    const c = kit.cards.find((k) => k.uid === uid);
+    if (!c || c.deck === deck || s.encounter) return;
+    const size = deckSize(kit);
+    if (deck && size >= DECK_MAX) {
+      this.send(s, { t: "notice", text: `Your deck is full (${DECK_MAX} cards).` });
+    } else if (!deck && size <= DECK_MIN) {
+      this.send(s, { t: "notice", text: `Your deck needs at least ${DECK_MIN} cards.` });
+    } else {
+      c.deck = deck;
+      this.saveKit(s);
+    }
+    this.sendCards(s);
+  }
+
+  /** What this NPC has on the shelves: fixed for each shopkeeper. */
+  private stockOf(s: Session, npc: Npc): { card: string; level: number }[] {
+    let h = 7;
+    for (const ch of `${s.player!.loc}:${npc.id}`) h = hash2(h, ch.charCodeAt(0), 31);
+    return shopStock(npc.service, rngFrom(h));
+  }
+
+  private sendShop(s: Session, npc: Npc): void {
+    const shop = shopKind(npc.service)!;
+    const kit = this.kit(s);
+    this.send(s, {
+      t: "shop", npc: npc.id, name: npc.name, title: shop.title, buyLabel: shop.buyLabel, upgradeLabel: shop.upgradeLabel,
+      stock: this.stockOf(s, npc).map((c) => ({ ...view(c.card, c.level), price: price(c.card, c.level) })),
+      sell: kit.cards.map((c) => ({ uid: c.uid, price: sellPrice(c.card, c.level, shop.trader) })),
+      upgrade: kit.cards
+        .filter((c) => c.level < MAX_LEVEL && shop.upgrades(card(c.card)))
+        .map((c) => ({ uid: c.uid, price: upgradeCost(c.card, c.level), next: view(c.card, c.level + 1) })),
+    });
+  }
+
+  private onShop(s: Session, msg: Extract<ClientMsg, { t: "shop_buy" | "shop_sell" | "shop_upgrade" }>): void {
+    const npc = this.npcInReach(s, msg.npc);
+    const shop = npc && shopKind(npc.service);
+    if (!npc || !shop) return;
+    const kit = this.kit(s);
+    const say = (text: string) => this.send(s, { t: "notice", text });
+    if (msg.t === "shop_buy") {
+      const item = this.stockOf(s, npc)[msg.index];
+      if (!item) return;
+      const cost = price(item.card, item.level);
+      if (kit.scrap < cost) {
+        say(`${npc.name}: "That's ${cost} scrap. Come back when you've got it."`);
+      } else {
+        kit.scrap -= cost;
+        const owned = addCard(kit, item.card, item.level);
+        say(`You ${shop.buyLabel === "Learn" ? "learn" : "buy"} ${view(item.card, item.level).name} for ${cost} scrap (into your ${owned.deck ? "deck" : "pack"}).`);
+      }
+    } else {
+      const i = kit.cards.findIndex((c) => c.uid === msg.uid);
+      const c = kit.cards[i];
+      if (!c) return;
+      if (msg.t === "shop_sell") {
+        if (c.deck && deckSize(kit) <= DECK_MIN) {
+          say(`Your deck needs at least ${DECK_MIN} cards: take one out of it some other way first.`);
+        } else {
+          const got = sellPrice(c.card, c.level, shop.trader);
+          kit.cards.splice(i, 1);
+          kit.scrap += got;
+          say(`You sell ${view(c.card, c.level).name} for ${got} scrap.`);
+        }
+      } else {
+        if (c.level >= MAX_LEVEL || !shop.upgrades(card(c.card))) return;
+        const cost = upgradeCost(c.card, c.level);
+        if (kit.scrap < cost) {
+          say(`${npc.name}: "${cost} scrap for that. You're short."`);
+        } else {
+          kit.scrap -= cost;
+          c.level++;
+          say(`${npc.name} works on it: ${view(c.card, c.level).name} (${cost} scrap).`);
+        }
+      }
+    }
+    this.saveKit(s);
+    this.sendCards(s);
+    this.sendShop(s, npc);
   }
 
   /** The map for a site location: the base, or a camp (built from its seed the first time). */
@@ -532,7 +694,7 @@ export class GameServer {
     const site = this.siteOf(loc);
     if (!mobs && site) {
       // The deeper you go, the bigger the packs.
-      const opts = { ...this.opts.monsters, ...DUNGEON_MONSTER_OPTIONS, maxPack: Math.min(15, 4 + down.level * 2) };
+      const opts = { ...this.opts.monsters, ...DUNGEON_MONSTER_OPTIONS, maxPack: Math.min(12, 3 + down.level) };
       if (this.opts.monsters.spawnChance === 0) opts.spawnChance = 0; // Spawning switched off (as in tests) is off down here too.
       mobs = new Monsters(dungeonGround(site), opts);
       this.dungeonMobs.set(loc, mobs);
@@ -547,51 +709,87 @@ export class GameServer {
     return site !== undefined && site.walkable(x, y) && !site.isExit(x, y);
   }
 
-  /** Pull every zombie near the player into a first-person fight. */
+  /** Pull every zombie pack near the player into a card battle. */
   private startEncounter(s: Session): void {
     const p = s.player!;
     const here = whereIs(p);
     const enemies = this.mobsFor(here.loc)?.take(here, this.opts.encounterRadius) ?? [];
-    const enc: Encounter = { id: this.nextEncounterId++, loc: here.loc, x: here.x, y: here.y, enemies };
+    const kit = this.kit(s);
+    const battle = new Battle({
+      seed: randomInt(1, 2 ** 31 - 1),
+      character: p.char,
+      deck: kit.cards.filter((c) => c.deck).map(({ uid, card, level }) => ({ uid, card, level })),
+      terrain: terrainCards(this.groundAround(here.loc, here.x, here.y, 3)),
+      packs: enemies.map((m) => ({ id: m.id, kind: m.kind, count: m.count })),
+    });
+    const enc: Encounter = { id: this.nextEncounterId++, loc: here.loc, x: here.x, y: here.y, enemies, battle };
     s.encounter = enc;
     const removed = enemies.map((m) => m.id);
     for (const other of this.sessions) if (other.player) this.syncMonsters(other, undefined, removed);
-    const total = enemies.reduce((n, m) => n + m.count, 0);
-    log(`[encounter] "${p.name}" vs ${total} zombie(s) in ${enemies.length} pack(s) in the ${here.loc} at (${here.x}, ${here.y})`);
-    this.send(s, {
-      t: "encounter_start",
-      id: enc.id,
-      x: enc.x,
-      y: enc.y,
-      radius: this.opts.encounterRadius,
-      seed: randomInt(1, 2 ** 31 - 1),
-      enemies: enemies.map((m) => ({ id: m.id, kind: m.kind, count: m.count, dx: m.x - enc.x, dy: m.y - enc.y })),
-    });
+    const groups = enemies.map((m) => `${m.count} ${m.count === 1 ? enemy(m.kind).one : enemy(m.kind).many}`).join(", ");
+    log(`[encounter] "${p.name}" vs ${groups || "nothing"} in the ${here.loc} at (${here.x}, ${here.y})`);
+    this.send(s, { t: "encounter_start", id: enc.id, x: enc.x, y: enc.y, battle: battle.view() });
   }
 
-  private onEncounterEnd(s: Session, msg: Extract<ClientMsg, { t: "encounter_end" }>): void {
-    const p = s.player;
-    const enc = s.encounter;
-    if (!p || !enc || msg.id !== enc.id) return; // Stale or duplicate: nothing to do.
-    const killed = new Set(msg.killed);
-    const survivors = enc.enemies.filter((m) => !killed.has(m.id));
-    if (msg.result === "victory" && survivors.length > 0) {
-      return this.fail(s, "bad_message", "Claimed victory with enemies still standing.");
+  /** The terrain keys of the tiles within r of (x, y) on a map: what the ground can give you in a fight. */
+  private groundAround(loc: Location, x: number, y: number, r: number): string[] {
+    const site = loc === "overworld" ? undefined : this.siteOf(loc);
+    const keys: string[] = [];
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (site && !site.inBounds(x + dx, y + dy)) continue;
+        const id = site ? site.tiles[(y + dy) * site.width + x + dx]! : this.world.tileAt(x + dx, y + dy);
+        const def = TILE_DEFS.find((t) => t.id === id);
+        if (def) keys.push(def.key);
+      }
     }
-    // Every zombie in a killed pack counts, plus those taken from packs that survived.
+    return keys;
+  }
+
+  /** A card played, a turn ended, a pass on answering the zombies, or a run for it. */
+  private onBattle(s: Session, msg: Extract<ClientMsg, { t: "battle_play" | "battle_end_turn" | "battle_pass" | "battle_flee" }>): void {
+    const enc = s.encounter;
+    if (!enc || msg.id !== enc.id) return; // Stale or duplicate: nothing to do.
+    const b = enc.battle;
+    const why =
+      msg.t === "battle_play" ? b.play(msg.uid, msg.target)
+      : msg.t === "battle_end_turn" ? b.endTurn(msg.target)
+      : msg.t === "battle_pass" ? b.pass()
+      : b.flee();
+    if (why) this.send(s, { t: "notice", text: why });
+    this.send(s, { t: "battle", id: enc.id, battle: b.view() });
+    if (b.over) this.finishEncounter(s, b.over);
+  }
+
+  /** The battle is decided: settle kills, scrap, loot, XP and where the player ends up. */
+  private finishEncounter(s: Session, result: EncounterResult): void {
+    const p = s.player!;
+    const enc = s.encounter!;
+    const b = enc.battle;
+    // Every enemy that fell counts, from groups wiped out and groups that survived smaller: by
+    // what it's worth (a raider three zombies, a rat a quarter of one). Bred rats count too.
     let kills = 0;
-    for (const m of enc.enemies) if (killed.has(m.id)) kills += m.count;
-    for (const m of survivors) {
-      const left = msg.remaining?.[String(m.id)];
-      if (left === undefined) continue;
-      const standing = Math.max(1, Math.min(m.count, left)); // Packs only shrink, and a survivor is at least one.
-      kills += m.count - standing;
-      m.count = standing;
+    let worth = 0;
+    const survivors: Monster[] = [];
+    for (const m of enc.enemies) {
+      const foe = b.foes.find((f) => f.id === m.id)!;
+      const standing = membersLeft(foe);
+      const fell = Math.max(0, Math.ceil(foe.maxHp / foe.type.hp) - standing);
+      kills += fell;
+      worth += fell * foe.type.value;
+      if (standing > 0) {
+        m.count = standing;
+        survivors.push(m);
+      }
     }
 
-    if (msg.result === "fled" && msg.dir) {
-      // Come out of the fight a few tiles away in the direction we ran.
-      const [dx, dy] = DIR_DELTA[msg.dir];
+    if (result === "fled") {
+      // Come out of the fight a few tiles away, running from where the packs were.
+      let ax = 0;
+      let ay = 0;
+      for (const m of survivors) [ax, ay] = [ax + m.x - enc.x, ay + m.y - enc.y];
+      const away: Dir = Math.abs(ax) >= Math.abs(ay) ? (ax > 0 ? "left" : "right") : ay > 0 ? "up" : "down";
+      const [dx, dy] = DIR_DELTA[away];
       const mobs = this.mobsFor(enc.loc);
       for (let d = 3; d >= 1; d--) {
         const nx = enc.x + dx * d;
@@ -610,17 +808,28 @@ export class GameServer {
     this.endEncounter(s, survivors);
     s.dirty = true;
     const after = whereIs(p);
-    log(`[encounter] "${p.name}" ${msg.result} (${kills} killed) -> (${after.x}, ${after.y})`);
-    // Health only goes down in a fight; dying means waking up healed in the infirmary.
+    log(`[encounter] "${p.name}" ${result} (${kills} killed) -> (${after.x}, ${after.y})`);
+    // Wounds carry over; dying means waking up healed in the infirmary.
     const c = p.char;
-    if (msg.result === "died") c.hp = c.maxHp;
-    else if (msg.hp !== undefined) c.hp = Math.max(1, Math.min(c.hp, Math.ceil(msg.hp)));
+    c.hp = result === "died" ? c.maxHp : Math.max(1, b.hp);
+    // Scrap from the fallen, and something worth taking after a win.
+    const kit = this.kit(s);
+    let scrap = 0;
+    for (let i = 0; i < Math.round(worth); i++) scrap += 1 + Math.floor(Math.random() * 3);
+    if (result === "victory") {
+      scrap += 5;
+      kit.offers.push(lootOffer(Math.random));
+    }
+    kit.scrap += scrap;
     this.storage.saveCharacter(p.id, c);
-    this.send(s, { t: "encounter_over", id: enc.id, result: msg.result, x: after.x, y: after.y });
-    const xp = kills * XP.kill + (msg.result === "victory" ? XP.victory : 0);
-    if (xp > 0) this.award(s, xp, `${kills} zombie${kills === 1 ? "" : "s"} put down${msg.result === "victory" ? ", area cleared" : ""}`);
+    this.send(s, { t: "encounter_over", id: enc.id, result, x: after.x, y: after.y });
+    if (scrap > 0) this.send(s, { t: "notice", text: `+${scrap} scrap.` });
+    this.sendCards(s);
+    const xp = Math.round(worth * XP.kill) + (result === "victory" ? XP.victory : 0);
+    if (xp > 0) this.award(s, xp, `${kills} ${kills === 1 ? "enemy" : "enemies"} put down${result === "victory" ? ", area cleared" : ""}`);
     else this.sendCharacter(s);
-    if (msg.result === "died") {
+    this.sendOffer(s);
+    if (result === "died") {
       // Carried back to the base and patched up in the infirmary.
       this.changeLocation(s, "base", this.base.respawn);
       return;
@@ -696,9 +905,7 @@ export class GameServer {
       }
     }
     wanted.sort((a, b) => Math.hypot(a[0] - pcx, a[1] - pcy) - Math.hypot(b[0] - pcx, b[1] - pcy));
-    let discovered = 0;
     for (const [cx, cy] of wanted) {
-      if (!this.world.existingChunk(cx, cy)) discovered++; // First to see this land.
       const tiles = this.world.chunk(cx, cy);
       s.sentChunks.add(`${cx},${cy}`);
       this.send(s, { t: "chunk", cx, cy, tiles: Buffer.from(tiles).toString("base64") });
@@ -706,7 +913,6 @@ export class GameServer {
         this.send(s, { t: "camp", id: camp.id, name: camp.name, x: camp.x, y: camp.y });
       }
     }
-    if (discovered > 0) this.award(s, discovered * XP.explore, "");
   }
 
   /** After `s` moved, joined or changed map, update who can see whom (same map, within view). */
@@ -804,6 +1010,12 @@ export class GameServer {
     this.send(s, { t: "error", code, message });
     s.ws.close(4001, code);
   }
+}
+
+/** A character as its player sees it: everything but the kit (sent as "cards"). */
+function publicCharacter(c: Character): Omit<Character, "kit"> {
+  const { kit: _kit, ...rest } = c;
+  return rest;
 }
 
 /** The dungeon and level of a dungeon location ("dungeon:<id>:<level>"; older saves have no level: the first). */

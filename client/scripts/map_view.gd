@@ -24,7 +24,6 @@ const BACKGROUND := Color.BLACK
 const LABEL_COLOR := Color(1.0, 1.0, 0.33) ## EGA yellow
 const OTHER_TINT := Color(1.0, 0.6, 0.3) ## as other players are tinted in the game
 const AVATAR_REGION := Rect2(0, 0, 16, 16) ## sprites.png column 0
-const ZOMBIE_REGION := Rect2(16, 0, 16, 16) ## sprites.png column 1
 const PIXEL_MAP := preload("res://shaders/pixel_map.gdshader")
 const TILES_ART := preload("res://assets/tiles.png")
 const SPRITES_ART := preload("res://assets/sprites.png")
@@ -33,9 +32,9 @@ const UNCHARTED := 255 ## tile id the shader reads as unknown land
 const TILES_MARGIN := 4 ## spare chunks around the charted area, so the tile texture rarely regrows
 ## Tiles the map shows as something else: camps are only marked once visited
 ## (by _draw_overlay), and the base is drawn there too, so neither is lost to a big cell.
-const SHOW_AS := {"camp_icon": "wasteland", "base_icon": "wasteland"}
+const SHOW_AS := {"camp_icon": "wasteland", "base_icon": "wasteland", "dungeon_icon": "wasteland", "bridge": "road"} ## (icons are drawn as pieces; causeways are highways)
 ## A cell with a road through it shows road, unless it's one of these.
-const KEEP_OVER_ROAD: Array[String] = ["ruins", "water", "mountains", "rubble"]
+const KEEP_OVER_ROAD: Array[String] = ["ruins", "mountains", "rubble"] ## (not water: highways cross it on causeways)
 
 var game: Node ## the game.gd scene that owns the chunk data
 var _center := Vector2.ZERO ## world tile position at the middle of the screen
@@ -49,6 +48,7 @@ var _tiles_chunks := Vector2i.ZERO ## the image's size, in chunks
 var _charted := {} ## Vector2i chunks already written into the image
 var _icon_of := {} ## tile key -> tile id, for the icons drawn over the map
 var _road_tiles := {} ## Vector2i -> true, every road tile charted
+var _dungeon_tiles := {} ## Vector2i -> true, every dungeon entrance charted
 var _road_masks := {} ## cell size -> ImageTexture counting the road tiles in each cell
 var _queue: Array[Vector2i] = []
 var _total := 0
@@ -79,6 +79,8 @@ func setup(owner_game: Node, tiles: Array) -> void:
 	var keep := PackedInt32Array()
 	for key in KEEP_OVER_ROAD:
 		keep.append(_icon_of.get(key, -1))
+	while keep.size() < 4: # the shader's array holds four
+		keep.append(-1)
 	material.set_shader_parameter("keep_over_road", keep)
 	_pixels = ColorRect.new()
 	_pixels.material = material
@@ -237,8 +239,10 @@ func _draw() -> void:
 	draw_rect(Rect2(Vector2.ZERO, size), BACKGROUND)
 
 
-## The base, visited camps, players and zombies, each drawn into the map cell
-## it's in at the map's own scale, like a piece on the game board.
+## The base, visited camps, dungeon entrances, players and monsters, each
+## drawn into the map cell it's in at the map's own scale, like a piece on the
+## game board. Places always show, at every zoom: a cell holding one shows it
+## rather than whatever terrain is most common there.
 func _draw_overlay() -> void:
 	if game == null:
 		return
@@ -254,11 +258,16 @@ func _draw_overlay() -> void:
 			_draw_in_cell(TILES_ART, Rect2(_icon_of.get("camp_icon", 0) * ART, 0, ART, ART), at, Color.WHITE)
 			_label(font, at, game.visited_camps[at])
 			placed[_cell_of(at)] = true
+	placed[_cell_of(Vector2i.ZERO)] = true
+	for at: Vector2i in _dungeon_tiles:
+		if not placed.has(_cell_of(at)) and screen.has_point(_world_to_screen(Vector2(at))):
+			_draw_in_cell(TILES_ART, Rect2(_icon_of.get("dungeon_icon", 0) * ART, 0, ART, ART), at, Color.WHITE)
+			placed[_cell_of(at)] = true
 
 	for id: int in game.monster_positions:
 		var at: Vector2i = game.monster_positions[id]
 		if not placed.has(_cell_of(at)):
-			_draw_in_cell(SPRITES_ART, ZOMBIE_REGION, at, Color.WHITE)
+			_draw_in_cell(SPRITES_ART, game.monster_region(game.monster_kinds.get(id, "zombie")), at, Color.WHITE)
 	for id: int in game.other_positions:
 		_draw_in_cell(SPRITES_ART, AVATAR_REGION, game.other_positions[id], OTHER_TINT)
 	# The player blinks, as the cursor did on old maps, so they're easy to find.
@@ -335,10 +344,17 @@ func _chart_new_chunks() -> void:
 		var chunk := Image.create_from_data(cs, cs, false, Image.FORMAT_R8, data)
 		_tiles_image.blit_rect(chunk, Rect2i(0, 0, cs, cs), (key - _tiles_origin) * cs)
 		_charted[key] = true
+		var hole: int = _icon_of.get("dungeon_icon", -1)
+		var i_hole := data.find(hole)
+		while i_hole >= 0:
+			@warning_ignore("integer_division")
+			_dungeon_tiles[key * cs + Vector2i(i_hole % cs, i_hole / cs)] = true
+			i_hole = data.find(hole, i_hole + 1)
 		var road: int = _icon_of.get("road", -1)
-		if data.count(road) > 0:
+		var bridge: int = _icon_of.get("bridge", -1)
+		if data.count(road) > 0 or data.count(bridge) > 0:
 			for i in data.size():
-				if data[i] == road:
+				if data[i] == road or data[i] == bridge:
 					@warning_ignore("integer_division")
 					_road_tiles[key * cs + Vector2i(i % cs, i / cs)] = true
 			_road_masks.clear()

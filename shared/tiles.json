@@ -40,6 +40,8 @@
     { "id": 35, "key": "ladder",      "name": "Ladder Up",        "passable": true,  "color": "#aa5500" },
     { "id": 36, "key": "stairs_down", "name": "Stairs Down",      "passable": true,  "color": "#aaaaaa" },
     { "id": 37, "key": "stairs_out",  "name": "Stairs to the Surface", "passable": true, "color": "#ffff55" },
-    { "id": 38, "key": "stairs_up",   "name": "Stairs Up",        "passable": true,  "color": "#ffffff" }
+    { "id": 38, "key": "stairs_up",   "name": "Stairs Up",        "passable": true,  "color": "#ffffff" },
+    { "id": 39, "key": "deep_water",  "name": "Dead Sea",         "passable": false, "color": "#101e5a" },
+    { "id": 40, "key": "bridge",      "name": "Old Causeway",     "passable": true,  "color": "#9a8a62" }
   ]
 }

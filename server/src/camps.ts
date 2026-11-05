@@ -37,8 +37,16 @@ const CAMP_GROUND = new Set<number>([T.WASTELAND, T.SCRUB, T.RUBBLE, T.ROAD, T.D
  * this chunk gets one: a walkable spot, well away from the base.
  */
 export function campSpot(seed: number, cx: number, cy: number, tiles: Uint8Array): { lx: number; ly: number } | undefined {
-  if (hash2(seed + SALT.place, cx, cy) / 4294967296 >= CAMP_CHANCE) return undefined;
+  // Camps grow up along the highways: likelier where one passes, and right beside it.
+  const roadside = besideAny(tiles, new Set([T.ROAD]), CAMP_GROUND);
+  const chance = CAMP_CHANCE * (roadside.length ? 3 : 0.6);
+  if (hash2(seed + SALT.place, cx, cy) / 4294967296 >= chance) return undefined;
   const rng = rngFrom(hash2(seed + SALT.spot, cx, cy));
+  if (roadside.length) {
+    const spot = roadside[Math.floor(rng() * roadside.length)]!;
+    const far = Math.hypot(cx * CHUNK_SIZE + spot.lx - BASE.icon.x, cy * CHUNK_SIZE + spot.ly - BASE.icon.y) >= CAMP_MIN_BASE_DISTANCE;
+    return far ? spot : undefined;
+  }
   for (let attempt = 0; attempt < 20; attempt++) {
     const lx = between(rng, 2, CHUNK_SIZE - 3);
     const ly = between(rng, 2, CHUNK_SIZE - 3);
@@ -48,6 +56,22 @@ export function campSpot(seed: number, cx: number, cy: number, tiles: Uint8Array
     if (CAMP_GROUND.has(tiles[ly * CHUNK_SIZE + lx]!)) return { lx, ly };
   }
   return undefined;
+}
+
+/**
+ * Tiles of `ground` in a chunk with one of `next` beside them (4-way), not on
+ * its outer edge (an icon there can't be walked round). Exported for dungeons.
+ */
+export function besideAny(tiles: Uint8Array, next: Set<number>, ground: Set<number>): { lx: number; ly: number }[] {
+  const out: { lx: number; ly: number }[] = [];
+  const at = (x: number, y: number) => tiles[y * CHUNK_SIZE + x]!;
+  for (let ly = 2; ly < CHUNK_SIZE - 2; ly++) {
+    for (let lx = 2; lx < CHUNK_SIZE - 2; lx++) {
+      if (!ground.has(at(lx, ly)) || next.has(at(lx, ly))) continue;
+      if (next.has(at(lx + 1, ly)) || next.has(at(lx - 1, ly)) || next.has(at(lx, ly + 1)) || next.has(at(lx, ly - 1))) out.push({ lx, ly });
+    }
+  }
+  return out;
 }
 
 /** The seed a camp's layout grows from. */
@@ -86,10 +110,10 @@ interface BoothType {
 /** The kinds of trader a camp can have; each camp picks a few. */
 export const BOOTH_TYPES: readonly BoothType[] = [
   { role: "Gunsmith", service: "weapons", lines: [
-    ["Everything here fires. Mostly in the direction you point it.", "Trading opens when the caps start flowing."],
+    ["Everything here fires. Mostly in the direction you point it.", "Scrap first, then we talk barrels."],
     ["Pipe guns, zip guns, the odd rifle with most of its parts.", "Come back with caps."]] },
   { role: "Armorer", service: "armor", lines: [
-    ["Tire rubber, road signs, a fridge door. All armor if you're brave.", "Nothing for sale until there's money in this wasteland."],
+    ["Tire rubber, road signs, a fridge door. All armor if you're brave.", "Pay in scrap and pick what fits."],
     ["I patch plates and sell them twice.", "Not today, though."]] },
   { role: "Medic", service: "healing", lines: [
     ["Bleeding? Sit. Don't touch anything.", "There. You'll scar, but you'll live."],
@@ -98,20 +122,24 @@ export const BOOTH_TYPES: readonly BoothType[] = [
     ["Your counter's clicking. That's never good.", "Once we can measure the rads in you, I can scrub them out."],
     ["Glow's pretty, isn't it? It'll kill you.", "Come back when the scrubbers are running."]] },
   { role: "Scrap Trader", service: "trade", lines: [
-    ["Wire, bolts, half a radio. One day it'll all be worth something.", "No deals yet."],
+    ["Wire, bolts, half a radio. I'll buy what you've got.", "I pay better than the rest. Ask anyone."],
     ["I buy junk and sell treasure. Same stuff.", "Nothing changing hands just now."]] },
   { role: "Water Seller", service: "water", lines: [
     ["Boiled twice, filtered once. Mostly clear.", "Water's for regulars only, for now."],
-    ["Don't drink the green puddles. Drink mine.", "When there's caps to pay with."]] },
+    ["Don't drink the green puddles. Drink mine.", "Clean enough. Mostly. Scrap up front."]] },
   { role: "Cook", service: "food", lines: [
-    ["Don't ask what's in it. It's warm.", "Kitchen's not serving strangers yet."],
+    ["Don't ask what's in it. It's warm.", "Scrap first. Then you eat."],
     ["Rat on a stick. Two-headed rat, extra stick.", "Come back hungry later."]] },
   { role: "Barkeep", service: "drink", lines: [
     ["Rotgut, fresh from the radiator.", "Heard the zombies get thicker out in the hot zones."],
     ["Sit, drink, don't start trouble.", "Folk say the base is southwest of most camps. Most."]] },
   { role: "Mechanic", service: "repair", lines: [
-    ["If it's broke, I can make it differently broke.", "Bring me something to fix, someday."],
-    ["Engine grease in my blood by now.", "No repairs till the parts trade picks up."]] },
+    ["If it's broke, I can make it differently broke.", "Bring me your gear and some scrap. It'll hit harder."],
+    ["Engine grease in my blood by now.", "Weapons, armor, whatever. I can make it better."]] },
+  { role: "Drill Instructor", service: "training", lines: [
+    ["Drop and give me twenty. Then we'll talk technique.", "Scrap up front. I teach, you bleed less."],
+    ["Fancy moves get you killed. Good habits keep you breathing.", "Bring me what you know and I'll sharpen it."],
+  ] },
   { role: "Rumormonger", service: "rumors", lines: [
     ["Packs out east come fifteen strong, they say.", "Don't fight in the fog if you can help it. Run for the dark ring."],
     ["Every camp has a medic or wishes it did.", "The dead don't sleep, but they're slow. Use that."]] },

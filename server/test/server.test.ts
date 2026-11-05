@@ -6,21 +6,24 @@ import { DatabaseSync } from "node:sqlite";
 import { after, test } from "node:test";
 import { WebSocket } from "ws";
 import { BaseMap } from "../src/base.ts";
+import { Battle, HP_PER_ZOMBIE, type CardRef } from "../src/battle.ts";
+import { ENEMIES, ENEMY_CARDS, enemyCardView, pickKind } from "../src/enemies.ts";
+import { CARDS, DECK_MIN, describe, price, sellPrice, starterKit, terrainCards, updateKit, upgradeCost, view } from "../src/cards.ts";
 import { BOOTH_TYPES, CAMP_MIN_BASE_DISTANCE, CAMP_STYLES, campLayout, checkLayout } from "../src/camps.ts";
 import { DUNGEON_LEGEND, DUNGEON_MIN_BASE_DISTANCE, checkDungeon, dungeonDepth, dungeonLayout } from "../src/dungeons.ts";
 import { XP, gainXp, raise, rollCharacter, xpForLevel } from "../src/character.ts";
-import { DEFAULT_MONSTER_OPTIONS, DUNGEON_MONSTER_OPTIONS, Monsters, dungeonGround, inSafeZone, rollPackSize, type MonsterOptions } from "../src/monsters.ts";
+import { DEFAULT_MONSTER_OPTIONS, DUNGEON_MONSTER_OPTIONS, Monsters, dungeonGround, inSafeZone, rollGroupSize, rollPackSize, type MonsterOptions } from "../src/monsters.ts";
 import { GameServer } from "../src/server.ts";
 import { Storage } from "../src/storage.ts";
 import { isPassable, T } from "../src/tiles.ts";
 import { World } from "../src/world.ts";
-import { CHUNK_SIZE, generateChunk, terrainAt } from "../src/worldgen.ts";
+import { CHUNK_SIZE, CONTINENTS, continentAt, generateChunk, geology, terrainAt, townIn } from "../src/worldgen.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "wasteland-test-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
 const BASE_MAP = BaseMap.load();
-const V = 10; // protocol version
+const V = 13; // protocol version
 let nextPort = 17777 + Math.floor(Math.random() * 1000);
 
 async function boot(dbPath: string, monsters: Partial<MonsterOptions> = {}) {
@@ -100,8 +103,29 @@ async function enterGame(port: number, name: string, token?: string) {
     c.send({ t: "accept" });
     character = (await c.until("character")).character;
   }
-  const location = await c.until("location");
-  return { c, welcome, location, character };
+  // Cards and any card choice come just before the location.
+  let cards: any;
+  let location: any;
+  while (!location) {
+    const m = await c.next();
+    if (m.t === "cards") cards = m;
+    if (m.t === "location") location = m;
+  }
+  return { c, welcome, location, character, cards };
+}
+
+/** Play a battle out: "win" attacks the first standing pack with whatever it can afford; "lose" just ends turns; "flee" runs. Zombie moves go unanswered. */
+async function battleOut(c: Client, start: any, mode: "win" | "lose" | "flee"): Promise<any> {
+  let b = start.battle;
+  for (let i = 0; i < 500 && !b.over; i++) {
+    const card = b.hand.find((h: any) => h.playable && h.type === "attack") ?? b.hand.find((h: any) => h.playable && h.cost > 0);
+    if (b.respond) c.send({ t: "battle_pass", id: start.id });
+    else if (mode === "flee") c.send({ t: "battle_flee", id: start.id });
+    else if (mode === "win" && card) c.send({ t: "battle_play", id: start.id, uid: card.uid, target: b.enemies.find((e: any) => e.hp > 0)?.id });
+    else c.send({ t: "battle_end_turn", id: start.id });
+    b = (await c.until("battle")).battle;
+  }
+  return b;
 }
 
 /** A new character leaves the base by the south gate (onto the highway at (0, 1)) and walks down it to (0, 12). */
@@ -350,12 +374,17 @@ test("a new player rolls, can reroll as often as they like, and enters the world
   await srv.stop();
 });
 
-test("exploring new land earns experience", async () => {
+test("walking about, even onto land nobody has seen, earns no experience", async () => {
   const srv = await boot(":memory:");
   const { c } = await enterGame(srv.port, "Scout");
-  for (let i = 0; i < 4; i++) await c.move("down"); // Out of the base: the first chunks anyone has seen.
-  const ch = (await c.until("character")).character;
-  assert.ok(ch.xp >= XP.explore, `earned ${ch.xp} XP exploring`);
+  // Out of the base and down the highway, through the first chunks anyone has seen: no XP on the way.
+  let seq = 1000;
+  for (let i = 0; i < 16; i++) {
+    c.send({ t: "move", dir: "down", seq: ++seq });
+    for (let m = await c.next(); m.t !== "you"; m = await c.next()) {
+      assert.ok(!(m.t === "character" && m.character.xp > 0), `earned ${m.character?.xp} XP just walking`);
+    }
+  }
   await c.close();
   await srv.stop();
 });
@@ -417,8 +446,11 @@ test("zombies shamble slowly onto players but never next to the base", () => {
 
   const ignored = zombieWorld();
   addZombie(ignored, 1, 0, 14);
-  for (let t = 0; t < 900 * 20; t += 900) ignored.tick(t, [hunter(0, 12, false)]);
-  assert.notEqual(ignored.all.get(1)!.y, 12, "untargetable players aren't chased onto");
+  for (let t = 0; t < 900 * 20; t += 900) {
+    ignored.tick(t, [hunter(0, 12, false)]);
+    const z = ignored.all.get(1)!;
+    assert.ok(z.x !== 0 || z.y !== 12, "untargetable players aren't chased onto (it may wander by)");
+  }
 });
 
 test("each zombie is a pack of 1-15, mostly big", () => {
@@ -461,8 +493,10 @@ test("clients see zombies approach, and a zombie reaching the player starts an e
 
   srv.server.monsters.all.get(1000)!.nextStepAt = 0; // Let it walk (tickMs is 20 in tests).
   const start = await c.until("encounter_start");
-  assert.deepEqual([start.x, start.y, start.radius], [0, 11, 8]);
-  assert.deepEqual(start.enemies.map((e: any) => [e.id, e.count, e.dx, e.dy]).sort(), [[1000, 1, 0, 0], [1001, 1, 3, 8]]);
+  assert.deepEqual([start.x, start.y], [0, 11]);
+  assert.deepEqual(start.battle.enemies.map((e: any) => [e.id, e.count, e.hp]).sort(), [[1000, 1, HP_PER_ZOMBIE], [1001, 1, HP_PER_ZOMBIE]]);
+  assert.equal(start.battle.hand.length >= 5, true, "a hand of cards to start");
+  assert.equal(start.battle.player.energy, 3);
   assert.ok(!srv.server.monsters.all.has(1000) && srv.server.monsters.all.has(1002));
 
   assert.equal((await c.move("down")).ok, false, "no overworld moves mid-fight");
@@ -471,67 +505,68 @@ test("clients see zombies approach, and a zombie reaching the player starts an e
   await srv.stop();
 });
 
-test("encounters end in victory, flight or death", async () => {
+test("battles end in victory, flight or death, and pay out scrap and loot", async () => {
   const srv = await boot(":memory:");
   const { c } = await walkOut(srv.port, "Hero");
   const mons = srv.server.monsters;
+  const p = onlyPlayer(srv.server);
+  p.char.maxHp = p.char.hp = 60; // Tough enough to win any fight here.
 
   // Walking onto a zombie starts a fight. (Zombies here never step: nextStepAt is far off.)
   addZombie(mons, 1, 0, 13, Date.now() + 60_000);
   addZombie(mons, 2, 2, 16, Date.now() + 60_000);
   await c.move("down");
   let start = await c.until("encounter_start");
-  assert.equal(start.enemies.length, 2);
-
-  const before = onlyPlayer(srv.server).char;
-  const xpBefore = before.xp;
-  const hpBefore = before.hp;
-  c.send({ t: "encounter_end", id: start.id, result: "victory", killed: [1, 2], hp: hpBefore - 1 });
+  assert.equal(start.battle.enemies.length, 2);
+  c.send({ t: "battle_play", id: start.id, uid: 999_999 });
+  assert.match((await c.until("notice")).text, /isn't in your hand/, "only cards in hand can be played");
+  const scrapBefore = p.char.kit.scrap;
+  const xpBefore = p.char.xp;
+  let b = await battleOut(c, start, "win");
+  assert.equal(b.over, "victory");
   let over = await c.until("encounter_over");
   assert.deepEqual([over.result, over.x, over.y], ["victory", 0, 13]);
   assert.equal(mons.all.size, 0, "the dead stay dead");
-  assert.match((await c.until("notice")).text, /XP/);
-  let ch = (await c.until("character")).character;
-  const bonus = 1 + Math.max(0, ch.int - 12) / 100;
-  assert.equal(ch.xp - xpBefore, Math.round((2 * XP.kill + XP.victory) * bonus), "XP for 2 kills and a victory");
-  assert.equal(ch.hp, hpBefore - 1, "wounds carry over");
+  assert.match((await c.until("notice")).text, /scrap/);
+  assert.ok(p.char.kit.scrap >= scrapBefore + 5 + 2, "scrap for the kills and the win");
+  const offer = await c.until("offer");
+  assert.equal(offer.reason, "loot");
+  assert.equal(offer.cards.length, 3, "three cards to choose from");
+  const bonus = 1 + Math.max(0, p.char.int - 12) / 100;
+  assert.equal(p.char.xp - xpBefore, Math.round((2 * XP.kill + XP.victory) * bonus), "XP for 2 kills and a victory");
+  assert.equal(p.char.hp, b.player.hp, "wounds carry over");
+  const owned = p.char.kit.cards.length;
+  c.send({ t: "offer_pick", index: 1 });
+  const cards = await c.until("cards");
+  assert.equal(cards.cards.length, owned + 1, "took the loot");
+  assert.ok(cards.cards.some((k: any) => k.card === offer.cards[1].card));
 
-  // Flee south: we come out 3 tiles that way and the survivor goes back to the map.
+  // Run for it: out a few tiles away from where the packs were (they're south: north it is), and they go back on the map.
   await new Promise((r) => setTimeout(r, 350)); // grace period
   addZombie(mons, 3, 0, 14, Date.now() + 60_000);
   addZombie(mons, 4, 0, 19, Date.now() + 60_000);
   await c.move("down");
   start = await c.until("encounter_start");
-  c.send({ t: "encounter_end", id: start.id, result: "fled", killed: [3], dir: "down", hp: 999 });
+  b = await battleOut(c, start, "flee");
+  assert.equal(b.over, "fled");
   over = await c.until("encounter_over");
-  ch = (await c.until("character")).character;
-  assert.equal(ch.hp, hpBefore - 1, "a client can't heal itself by reporting more health");
-  assert.deepEqual([over.result, over.x, over.y], ["fled", 0, 17]);
-  assert.deepEqual([...mons.all.keys()], [4], "survivor returned to the overworld");
-  const back = mons.all.get(4)!;
-  assert.deepEqual([back.x, back.y], [0, 19]);
-
-  // Claiming victory with zombies still standing is refused.
-  await new Promise((r) => setTimeout(r, 350));
-  mons.all.clear();
-  addZombie(mons, 5, 0, 18, Date.now() + 60_000);
-  await c.move("down");
-  start = await c.until("encounter_start");
-  c.send({ t: "encounter_end", id: start.id, result: "victory", killed: [] });
-  assert.equal((await c.until("error")).code, "bad_message", "can't claim victory with zombies standing");
+  assert.deepEqual([over.result, over.x, over.y], ["fled", 0, 11]);
+  assert.deepEqual([...mons.all.keys()].sort(), [3, 4], "both packs back on the overworld");
   await c.close();
 
   // Die: carried back to the base's infirmary.
   const d = (await walkOut(srv.port, "Doomed")).c;
+  const q = [...(srv.server as any).byPlayerId.values()].find((x: any) => x.player.name === "Doomed").player;
+  q.char.hp = 1;
   mons.all.clear();
-  addZombie(mons, 6, 0, 13, Date.now() + 60_000);
+  addZombie(mons, 6, 0, 13, Date.now() + 60_000, 15);
   await d.move("down");
   start = await d.until("encounter_start");
-  d.send({ t: "encounter_end", id: start.id, result: "died", killed: [], hp: 0 });
+  b = await battleOut(d, start, "lose");
+  assert.equal(b.over, "died");
   over = await d.until("encounter_over");
   assert.equal(over.result, "died");
-  ch = (await d.until("character")).character;
-  assert.equal(ch.hp, ch.maxHp, "wake up healed");
+  assert.equal(q.char.hp, q.char.maxHp, "wake up healed");
   const loc = await d.until("location");
   assert.deepEqual([loc.kind, loc.x, loc.y], ["base", BASE_MAP.respawn.x, BASE_MAP.respawn.y]);
   await d.close();
@@ -546,23 +581,213 @@ test("packs: every zombie killed earns XP, and partly killed packs come back sma
   addZombie(mons, 2, 0, 19, Date.now() + 60_000, 2); // a pack of 2 (wiped out)
   await c.move("down");
   const start = await c.until("encounter_start");
-  assert.deepEqual(start.enemies.map((e: any) => [e.id, e.count]).sort(), [[1, 3], [2, 2]]);
+  assert.deepEqual(start.battle.enemies.map((e: any) => [e.id, e.count]).sort(), [[1, 3], [2, 2]]);
 
-  const xpBefore = onlyPlayer(srv.server).char.xp;
-  c.send({ t: "encounter_end", id: start.id, result: "fled", killed: [2], remaining: { 1: 1 }, dir: "up" });
+  const p = onlyPlayer(srv.server);
+  const xpBefore = p.char.xp;
+  const battle: Battle = (srv.server as any).byPlayerId.get(p.id).encounter.battle;
+  battle.foes.find((f) => f.id === 1)!.hp = HP_PER_ZOMBIE; // one zombie left
+  battle.foes.find((f) => f.id === 2)!.hp = 0;
+  battle.flee(); // (straight on the engine: the next message settles it)
+  c.send({ t: "battle_flee", id: start.id });
   await c.until("encounter_over");
-  const ch = (await c.until("character")).character;
-  const bonus = 1 + Math.max(0, ch.int - 12) / 100;
-  assert.equal(ch.xp - xpBefore, Math.round(4 * XP.kill * bonus), "2 + 2 zombies killed");
+  const bonus = 1 + Math.max(0, p.char.int - 12) / 100;
+  assert.equal(p.char.xp - xpBefore, Math.round(4 * XP.kill * bonus), "2 + 2 zombies killed");
   assert.deepEqual([...mons.all.values()].map((m) => [m.id, m.count]), [[1, 1]], "one zombie left of the pack of 3");
+  await c.close();
+  await srv.stop();
+});
 
-  // A pack can't grow back through a report.
-  await new Promise((r) => setTimeout(r, 350));
-  await c.move("down");
-  const again = await c.until("encounter_start");
-  c.send({ t: "encounter_end", id: again.id, result: "fled", killed: [], remaining: { 1: 15 }, dir: "up" });
-  await c.until("encounter_over");
-  assert.equal(mons.all.get(1)!.count, 1);
+// ---- the card battle engine ----
+
+const fighter = { created: true, level: 1, xp: 0, str: 12, dex: 12, int: 12, maxHp: 10, hp: 10, points: 0 };
+const deckOf = (...ids: string[]): CardRef[] => ids.map((card, i) => ({ uid: i + 1, card, level: 0 }));
+
+test("battles: energy pays for cards, attacks wear packs down zombie by zombie, Block soaks hits", () => {
+  const b = new Battle({ seed: 1, character: fighter, deck: deckOf("swing", "swing", "swing", "brace", "brace", "hunting_rifle"), terrain: [], packs: [{ id: 7, count: 4 }] });
+  b.foes[0]!.reaction = undefined;
+  const v = b.view();
+  assert.deepEqual([v.player.energy, v.hand.length, v.enemies[0]!.hp, v.enemies[0]!.count], [3, 5, 4 * HP_PER_ZOMBIE, 4]);
+  // Spend energy until a card can't be afforded.
+  let spent = 0;
+  for (const card of [...b.hand]) {
+    const cost = CARDS.get(card.card)!.levels[0]!.cost;
+    const why = b.play(card.uid, 7);
+    if (spent + cost > 3) assert.equal(why, "Not enough energy.");
+    else spent += cost;
+  }
+  assert.equal(b.energy, 3 - spent);
+  // Damage takes zombies off the pack.
+  const foe = b.foes[0]!;
+  foe.hp = 4 * HP_PER_ZOMBIE;
+  foe.block = 0;
+  (b as any).hurtFoe(foe, HP_PER_ZOMBIE);
+  assert.equal(b.view().enemies[0]!.count, 3, "one zombie's worth of damage on a pack of 4 kills one");
+  // Block soaks an attack, the rest gets through.
+  b.block = 2;
+  foe.intent = { card: "claw", name: "Claw", damage: 3 };
+  foe.status.weak = 0;
+  b.endTurn();
+  assert.equal(b.hp, 9, "3 damage, 2 blocked");
+  assert.equal(b.block, 0, "Block is gone by the next turn");
+  assert.equal(b.energy, 3, "energy back for the next turn");
+});
+
+test("battles: Weak, Vulnerable, Poison, Strength and Thorns", () => {
+  const b = new Battle({ seed: 2, character: { ...fighter, str: 21 }, deck: deckOf(...Array(10).fill("swing")), terrain: [], packs: [{ id: 1, count: 10 }] });
+  assert.equal(b.status.strength, 2, "strength 21 gives 2 Strength");
+  const foe = b.foes[0]!;
+  const hit = (dmg: number) => {
+    const before = foe.hp;
+    (b as any).hurtFoe(foe, dmg);
+    return before - foe.hp;
+  };
+  foe.status.vulnerable = 1;
+  assert.equal(hit(4), 6, "Vulnerable takes 50% more");
+  foe.status.vulnerable = 0;
+  // Poison ticks at the end of the zombies' turn, one less each time.
+  foe.status.poison = 3;
+  foe.intent = { card: "close_ranks", name: "Close Ranks", block: 0 };
+  const before = foe.hp;
+  b.endTurn();
+  assert.equal(before - foe.hp, 3);
+  assert.equal(foe.status.poison, 2);
+  // Weak zombies hit for 25% less; Thorns hurt them back.
+  foe.status.weak = 2;
+  foe.intent = { card: "claw", name: "Claw", damage: 4 };
+  b.status.thorns = 1;
+  b.block = 0;
+  const hp = b.hp;
+  const fhp = foe.hp;
+  b.endTurn();
+  assert.equal(hp - b.hp, 3, "4 damage, weakened to 3");
+  assert.equal(fhp - foe.hp, 1 + 2, "1 from Thorns, then 2 Poison");
+  assert.match(describe(CARDS.get("swing")!.levels[0]!, { strength: 2 }), /Deal 4 damage/, "card text shows Strength");
+});
+
+test("battles are decided: victory when every pack is down, death at 0 HP, and they replay exactly from the seed", () => {
+  const setup = { seed: 42, character: fighter, deck: deckOf("swing", "swing", "brace", "pipe_swing", "brace", "swing", "swing", "brace"), terrain: ["take_cover"], packs: [{ id: 1, count: 2 }, { id: 2, count: 3 }] };
+  assert.deepEqual(new Battle(setup).view(), new Battle(setup).view(), "same seed, same battle");
+  const b = new Battle({ ...setup, deck: deckOf(...Array(8).fill("swing")) });
+  for (const f of b.foes) {
+    f.hp = 1;
+    f.reaction = undefined;
+  }
+  b.energy = 10;
+  b.play(b.hand[0]!.uid, 1);
+  assert.equal(b.view().over, undefined, "one pack still standing");
+  b.play(b.hand[0]!.uid, 2);
+  assert.equal(b.view().over, "victory");
+  const d = new Battle({ ...setup, character: { ...fighter, hp: 1 } });
+  for (const f of d.foes) f.intent = { card: "claw", name: "Claw", damage: 5 };
+  d.endTurn();
+  while (d.respond) d.pass(); // (a Take Cover in hand is a Reaction: don't answer)
+  assert.equal(d.view().over, "died");
+  assert.equal(new Battle(setup).view().drawPile + 5, 9, "the terrain card joins the draw pile");
+});
+
+test("the ground gives cards: ruins give cover, the woods a branch, the dungeon a cave-in", () => {
+  assert.deepEqual(terrainCards([...Array(30).fill("ruins"), ...Array(19).fill("road")]), ["take_cover", "take_cover", "wreck_barricade", "wreck_barricade"]);
+  assert.deepEqual(terrainCards([...Array(40).fill("wasteland"), ...Array(4).fill("dead_forest"), "water"]), ["dust_kick", "dust_kick", "snapped_branch"]);
+  assert.deepEqual(terrainCards(Array(49).fill("cave_floor")), ["cave_in", "cave_in"]);
+  assert.deepEqual(terrainCards(["water", "water"]), [], "not enough of anything");
+});
+
+// ---- cards: the kit, shops and offers ----
+
+test("every survivor starts with a deck, and keeps at least the minimum in it", async () => {
+  const srv = await boot(":memory:");
+  const { c, cards } = await enterGame(srv.port, "Rookie");
+  assert.equal(cards.scrap, 40);
+  assert.deepEqual(cards.cards.map((k: any) => k.card).sort(), [...Array(3).fill("brace"), "duck", "pipe_swing", "scrap_vest", ...Array(5).fill("swing")].sort());
+  assert.ok(cards.cards.every((k: any) => k.deck && k.text.length > 0));
+  // Take cards out until only the minimum is left: the next one is refused.
+  let last: any;
+  const spare = cards.cards.length - DECK_MIN;
+  for (const k of cards.cards.slice(0, spare)) {
+    c.send({ t: "deck_set", uid: k.uid, deck: false });
+    last = await c.until("cards");
+  }
+  assert.equal(last.cards.filter((k: any) => k.deck).length, DECK_MIN);
+  c.send({ t: "deck_set", uid: cards.cards[spare].uid, deck: false });
+  assert.match((await c.until("notice")).text, /at least/);
+  assert.equal((await c.until("cards")).cards.filter((k: any) => k.deck).length, DECK_MIN, "still the minimum");
+  // And back in again.
+  c.send({ t: "deck_set", uid: cards.cards[0].uid, deck: true });
+  assert.equal((await c.until("cards")).cards.filter((k: any) => k.deck).length, DECK_MIN + 1);
+  await c.close();
+  await srv.stop();
+});
+
+test("shops: buy from the quartermaster, sell anywhere, train abilities with the sergeant", async () => {
+  const srv = await boot(":memory:");
+  const { c } = await enterGame(srv.port, "Shopper");
+  const p = onlyPlayer(srv.server);
+  p.char.kit.scrap = 1000;
+  const standBy = (service: string) => {
+    const npc = BASE_MAP.npcs.find((n) => n.service === service)!;
+    const spot = [[0, 1], [0, -1], [1, 0], [-1, 0], [0, 2], [0, -2], [2, 0], [-2, 0]].find(([dx, dy]) => BASE_MAP.walkable(npc.x + dx!, npc.y + dy!))!;
+    [p.bx, p.by] = [npc.x + spot[0]!, npc.y + spot[1]!];
+    return npc;
+  };
+  const rourke = standBy("weapons");
+  c.send({ t: "service", npc: rourke.id });
+  let shop = await c.until("shop");
+  assert.equal(shop.title, "Weapons");
+  assert.ok(shop.stock.length >= 4 && shop.stock.every((k: any) => CARDS.get(k.card)!.slot === "weapon"), "weapons on the shelves");
+  const item = shop.stock[0];
+  c.send({ t: "shop_buy", npc: rourke.id, index: 0 });
+  let cards = await c.until("cards");
+  assert.equal(cards.scrap, 1000 - item.price);
+  assert.equal(item.price, price(item.card, item.level));
+  const bought = cards.cards.find((k: any) => k.card === item.card && k.level === item.level);
+  assert.ok(bought, "it's yours");
+  shop = await c.until("shop");
+  // Sell it back (for less).
+  const offer = shop.sell.find((x: any) => x.uid === bought.uid);
+  assert.equal(offer.price, sellPrice(item.card, item.level, false));
+  c.send({ t: "shop_sell", npc: rourke.id, uid: bought.uid });
+  cards = await c.until("cards");
+  assert.equal(cards.scrap, 1000 - item.price + offer.price);
+  assert.ok(!cards.cards.some((k: any) => k.uid === bought.uid));
+  await c.until("shop"); // the quartermaster's shelves again
+
+  // The sergeant teaches abilities and trains cards up: Swing becomes Swing+.
+  const sarge = standBy("training");
+  c.send({ t: "service", npc: sarge.id });
+  shop = await c.until("shop");
+  assert.equal(shop.buyLabel, "Learn");
+  assert.ok(shop.stock.every((k: any) => CARDS.get(k.card)!.kind === "ability"));
+  const swing = cards.cards.find((k: any) => k.card === "swing");
+  const up = shop.upgrade.find((x: any) => x.uid === swing.uid);
+  assert.equal(up.price, upgradeCost("swing", 0));
+  assert.equal(up.next.name, "Swing+");
+  c.send({ t: "shop_upgrade", npc: sarge.id, uid: swing.uid });
+  cards = await c.until("cards");
+  const trained = cards.cards.find((k: any) => k.uid === swing.uid);
+  assert.deepEqual([trained.name, trained.level, trained.text], ["Swing+", 1, view("swing", 1).text]);
+
+  // Out of reach: nothing doing.
+  p.bx = BASE_MAP.entry.x;
+  p.by = BASE_MAP.entry.y;
+  c.send({ t: "shop_buy", npc: rourke.id, index: 0 });
+  c.send({ t: "map" });
+  assert.equal((await c.until("map_index")).t, "map_index");
+  assert.equal(p.char.kit.cards.length, starterKit().cards.length, "no sale from across the base");
+  await c.close();
+  await srv.stop();
+});
+
+test("levelling up offers a new ability card to learn", async () => {
+  const srv = await boot(":memory:");
+  const { c } = await enterGame(srv.port, "Learner");
+  (srv.server as any).award((srv.server as any).byPlayerId.get(onlyPlayer(srv.server).id), 100, "test");
+  const offer = await c.until("offer");
+  assert.equal(offer.reason, "level");
+  assert.ok(offer.cards.every((k: any) => CARDS.get(k.card)!.kind === "ability"));
+  c.send({ t: "offer_pick", index: -1 }); // No thanks.
+  const cards = await c.until("cards");
+  assert.equal(cards.cards.length, starterKit().cards.length);
   await c.close();
   await srv.stop();
 });
@@ -713,12 +938,12 @@ test("every dungeon level is a walled-in labyrinth of rooms, doors and passages,
     shapes.add(text);
   }
   assert.equal(shapes.size, 200, "every dungeon is different");
-  assert.deepEqual([...depths].sort(), [2, 3, 4], "dungeons are 2 to 4 levels deep");
+  assert.deepEqual([...depths].sort(), [5, 6, 7, 8, 9], "dungeons are 5 to 9 levels deep");
   assert.deepEqual(dungeonLayout(9, "Same", 2), dungeonLayout(9, "Same", 2), "a level's layout comes from the seed and level");
   assert.notDeepEqual(dungeonLayout(9, "Same", 1).map, dungeonLayout(9, "Same", 2).map, "each level is different");
 });
 
-test("dungeon entrances are dug into new land away from the base", () => {
+test("dungeon entrances are dug into mountainsides in new land, away from the base", () => {
   const storage = new Storage(join(dir, "dungeons.db"));
   const world = new World(storage, 4242);
   let found = 0;
@@ -732,6 +957,8 @@ test("dungeon entrances are dug into new land away from the base", () => {
         const d = storage.dungeonAt(x, y);
         assert.ok(d, `the entrance at (${x}, ${y}) is on record`);
         assert.ok(Math.hypot(x, y) >= DUNGEON_MIN_BASE_DISTANCE, "clear of the base");
+        const around = [world.tileAt(x + 1, y), world.tileAt(x - 1, y), world.tileAt(x, y + 1), world.tileAt(x, y - 1)];
+        assert.ok(around.includes(T.MOUNTAINS), `the entrance at (${x}, ${y}) is dug into a mountainside`);
         found++;
       });
     }
@@ -790,10 +1017,12 @@ test("players go down into a dungeon, fight what's there, and climb back out", {
   const [way, [dx, dy]] = Object.entries(dirs).find(([, [x, y]]) => site.walkable(site.entry.x + x, site.entry.y + y) && !site.isExit(site.entry.x + x, site.entry.y + y))!;
   addZombie(mobs, 9001, site.entry.x + dx, site.entry.y + dy, Date.now() + 60_000, 3);
   await c.move(way);
+  p.char.maxHp = p.char.hp = 60;
   const start = await c.until("encounter_start");
   assert.deepEqual([start.x, start.y], [site.entry.x + dx, site.entry.y + dy], "the fight is where we stand in the dungeon");
-  assert.equal(start.enemies[0].count, 3);
-  c.send({ t: "encounter_end", id: start.id, result: "victory", killed: [9001] });
+  assert.equal(start.battle.enemies[0].count, 3);
+  assert.ok(start.battle.terrain.includes("cave_in"), "the tunnels give you a cave-in");
+  assert.equal((await battleOut(c, start, "win")).over, "victory");
   const over = await c.until("encounter_over");
   assert.equal(p.loc, `dungeon:${d.id}:1`, "still down in the dungeon after the fight");
   assert.deepEqual([over.x, over.y], [p.bx, p.by]);
@@ -852,4 +1081,321 @@ test("players go down into a dungeon, fight what's there, and climb back out", {
   assert.equal(out2.kind, "overworld", "and out by the ladder");
   await c.close();
   await stop();
+});
+
+test("fleeing a battle costs only a glancing blow from each pack", () => {
+  const b = new Battle({ seed: 3, character: fighter, deck: deckOf(...Array(8).fill("swing")), terrain: [], packs: [{ id: 1, count: 15 }, { id: 2, count: 15 }] });
+  for (const f of b.foes) f.intent = { card: "claw", name: "Claw", damage: 5 };
+  b.flee();
+  assert.equal(b.view().over, "fled");
+  assert.equal(b.hp, 10 - 3 - 3, "two packs hitting for 5, halved (rounded up) as you run");
+});
+
+// ---- the stack: reactions, answers, counters and allies ----
+
+/** A battle against one pack with a known hand (and plenty of cards behind it). */
+function stackBattle(hand: string[], count = 6, reaction?: Battle["foes"][number]["reaction"]): Battle {
+  const b = new Battle({ seed: 5, character: fighter, deck: deckOf(...Array(12).fill("swing")), terrain: [], packs: [{ id: 1, count }] });
+  b.discard.push(...b.hand);
+  b.hand = hand.map((card, i) => ({ uid: 100 + i, card, level: 0 }));
+  b.foes[0]!.reaction = reaction;
+  b.foes[0]!.intent = { card: "claw", name: "Claw", damage: 4 };
+  return b;
+}
+
+test("packs react to your cards before they land, once a round", () => {
+  const b = stackBattle(["swing", "swing"], 6, { card: "lurch", name: "Lurch", trigger: "attacked", block: 2 });
+  const foe = b.foes[0]!;
+  b.play(100, 1);
+  assert.equal(foe.hp, 12, "the pack lurched first: 2 Block soaked the 2 damage");
+  assert.match(b.log.join(" "), /gains 2 Block/);
+  b.play(101, 1);
+  assert.equal(foe.hp, 10, "no reaction left this round");
+  assert.equal(b.view().enemies[0]!.reaction!.ready, false);
+
+  const s = stackBattle(["swing"], 6, { card: "swarm", name: "Swarm", trigger: "attacked", strike: 3 });
+  s.play(100, 1);
+  assert.equal(s.hp, 7, "the pack clawed back before the swing landed");
+  assert.equal(s.foes[0]!.hp, 10);
+});
+
+test("Reactions answer the zombies' moves on their turn; Actions can't", () => {
+  const b = stackBattle(["duck", "swing"]);
+  b.energy = 2;
+  b.endTurn();
+  let v = b.view();
+  assert.equal(v.phase, "zombies");
+  assert.equal(v.respond, true, "the attack waits on the stack for an answer");
+  assert.deepEqual(v.stack.map((i) => i.name), ["Zombies A: Claw"]);
+  assert.equal(v.hand.find((c) => c.card === "swing")!.playable, false, "an Action can't answer");
+  assert.equal(b.play(101, 1), "Only a Reaction can answer that.");
+  assert.equal(b.play(100), undefined);
+  v = b.view();
+  assert.equal(v.phase, "you", "the stack landed and your next turn began");
+  assert.equal(b.hp, 9, "4 damage, 3 ducked");
+  assert.equal(b.energy, 3);
+
+  // Pass instead and it lands in full.
+  const p = stackBattle(["duck"]);
+  p.endTurn();
+  assert.equal(p.respond, true);
+  assert.equal(p.pass(), undefined);
+  assert.equal(p.hp, 6);
+
+  // With no energy left (or no Reactions) the zombies just get on with it.
+  const q = stackBattle(["duck"]);
+  q.energy = 0;
+  q.endTurn();
+  assert.equal(q.respond, false);
+  assert.equal(q.hp, 6);
+});
+
+test("counters: Sidestep cancels an attack, Trip Up cancels a pack's reaction", () => {
+  const b = stackBattle(["sidestep"]);
+  b.endTurn();
+  b.play(100);
+  assert.equal(b.hp, 10, "the attack was countered");
+  assert.match(b.log.join(" "), /countered/);
+
+  // Duck!, the pack grabs it, Trip Up answers the grab: the Block lands after all.
+  const g = stackBattle(["duck", "trip_up"], 6, { card: "grab", name: "Grab", trigger: "block_card", counter: true });
+  g.endTurn();
+  g.play(100);
+  assert.equal(g.respond, true, "the grab is on top of the stack, waiting for an answer");
+  assert.deepEqual(g.view().stack.map((i) => i.name), ["Zombies A: Claw", "Duck!", "Zombies A: Grab"]);
+  g.play(101);
+  assert.equal(g.hp, 9, "Duck! landed: 4 damage, 3 blocked");
+
+  // Counters only answer the right thing.
+  const t = stackBattle(["trip_up"]);
+  t.endTurn();
+  assert.equal(t.respond, false, "Trip Up can't answer an attack, so nothing waits");
+});
+
+test("allies join the fight, attack the marked pack, draw attacks with Guard, and go down", () => {
+  const b = stackBattle(["stray_dog", "militia"], 10);
+  b.play(100);
+  b.play(101);
+  assert.deepEqual(b.allies.map((a) => a.name), ["Stray Dog", "Militia Recruit"]);
+  assert.equal(b.energy, 0);
+  const foe = b.foes[0]!;
+  foe.intent = { card: "claw", name: "Claw", damage: 5 };
+  b.endTurn();
+  assert.equal(foe.hp, 20 - 2 - 2, "both allies attacked");
+  assert.equal(b.hp, 10, "the guard took the hit");
+  assert.deepEqual(b.allies.map((a) => a.name), ["Stray Dog"], "5 damage was too much for the recruit");
+  assert.ok(b.discard.some((c) => c.uid === 101), "a fallen ally's card goes to the discard pile");
+});
+
+test("decks from before Reactions get a Duck!, once", () => {
+  const kit = starterKit();
+  kit.cards = kit.cards.filter((c) => c.card !== "duck");
+  assert.equal(updateKit(kit), true);
+  assert.equal(kit.cards.filter((c) => c.card === "duck").length, 1);
+  assert.equal(updateKit(kit), false);
+  assert.equal(view("trip_up", 0).speed, "reaction");
+  assert.equal(view("stray_dog", 1).power, 3);
+  assert.match(view("riposte", 0).text, /to the pack you answer/);
+});
+
+// ---- other enemies ----
+
+/** A battle against one group of `kind`, playing `move` next, with a known hand. */
+function enemyBattle(kind: string, count: number, move: string, hand: string[] = []): Battle {
+  const b = new Battle({ seed: 9, character: { ...fighter, hp: 20, maxHp: 20 }, deck: deckOf(...Array(12).fill("swing")), terrain: [], packs: [{ id: 1, kind, count }] });
+  b.discard.push(...b.hand);
+  b.hand = hand.map((card, i) => ({ uid: 100 + i, card, level: 0 }));
+  const f = b.foes[0]!;
+  f.reaction = undefined;
+  f.intent = { card: move, name: ENEMY_CARDS.get(move)!.name };
+  Object.assign(f.intent, Object.fromEntries(Object.entries(ENEMY_CARDS.get(move)!).filter(([k]) => ["damage", "hits", "all", "block", "weak", "vulnerable", "poison", "discard", "strength", "heal", "summon"].includes(k)).map(([k, v]) => [k, typeof v === "object" ? (v as any).base + Math.floor(count / (v as any).per) : v])));
+  return b;
+}
+
+test("every kind of enemy has a deck of moves that fits it, and sizes and health of its own", () => {
+  for (const e of ENEMIES.values()) {
+    assert.ok(e.moves.length >= 4 && e.reactions.length >= 3, `${e.kind} has moves and reactions`);
+    for (let i = 0; i < 50; i++) {
+      const n = rollGroupSize(e.kind);
+      if (e.size) assert.ok(n >= e.size[0] && n <= e.size[1], `${e.kind} group of ${n}`);
+    }
+    const b = new Battle({ seed: 3, character: fighter, deck: deckOf(...Array(8).fill("swing")), terrain: [], packs: [{ id: 1, kind: e.kind, count: 4 }] });
+    const v = b.view().enemies[0]!;
+    assert.equal(v.hp, 4 * e.hp);
+    assert.equal(v.sprite, e.sprite);
+    assert.ok(e.moves.some((m) => m.id === v.intent.card), `${e.kind} shows one of its own moves`);
+    assert.ok(v.cards.length >= e.moves.length && v.cards.every((c) => c.kind === "enemy" && c.text.length > 0));
+  }
+  assert.match(enemyCardView(ENEMY_CARDS.get("return_fire")!, 4, ENEMIES.get("raider")!).text, /When attacked, it hits the attacker for 3 first/);
+  assert.match(enemyCardView(ENEMY_CARDS.get("breed")!, 8, ENEMIES.get("rats")!).text, /3 more rats join/);
+});
+
+test("they turn up where they belong: crawlers and rats underground, hounds in the scrub, ghouls in the hot zones", () => {
+  let seed = 1;
+  const rng = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  const tally = (dungeon: boolean, key: string) => {
+    const n = new Map<string, number>();
+    for (let i = 0; i < 2000; i++) {
+      const k = pickKind(dungeon, key, rng);
+      n.set(k, (n.get(k) ?? 0) + 1);
+    }
+    return n;
+  };
+  const under = tally(true, "cave_floor");
+  assert.equal(under.get("hound") ?? 0, 0, "no hounds underground");
+  assert.ok((under.get("crawler") ?? 0) > 100 && (under.get("rats") ?? 0) > 200);
+  const scrub = tally(false, "scrub");
+  assert.equal(scrub.get("crawler") ?? 0, 0, "no crawlers in the open");
+  assert.ok((scrub.get("hound") ?? 0) > (tally(false, "road").get("hound") ?? 0), "hounds favour the scrub");
+  assert.ok((tally(false, "radiation").get("ghoul") ?? 0) > 3 * (tally(false, "water").get("ghoul") ?? 0), "ghouls favour the hot zones");
+});
+
+test("enemy moves: ghouls pulse everyone, rats breed, ghouls feed only when hurt, raiders disarm you", () => {
+  const g = enemyBattle("ghoul", 2, "rad_pulse", ["stray_dog"]);
+  g.play(100);
+  g.endTurn();
+  assert.equal(g.hp, 20 - 2, "the pulse hit you");
+  assert.equal(g.allies.length, 0, "and the dog, which went down");
+
+  const r = enemyBattle("rats", 4, "breed");
+  r.endTurn();
+  assert.equal(r.view().enemies[0]!.count, 6, "4 rats bred 2 more");
+
+  const f = enemyBattle("ghoul", 2, "feed");
+  f.foes[0]!.hp = 7;
+  f.endTurn();
+  assert.equal(f.foes[0]!.hp, 11, "fed for 4");
+  for (let i = 0; i < 20; i++) {
+    f.foes[0]!.hp = f.foes[0]!.maxHp;
+    f.foes[0]!.intent = (f as any).chooseIntent(f.foes[0]!);
+    assert.notEqual(f.foes[0]!.intent.card, "feed", "no feeding at full health");
+  }
+
+  const d = enemyBattle("raider", 2, "disarm", ["duck", "pistol"]);
+  d.energy = 0;
+  d.endTurn();
+  assert.equal(d.respond, true, "a Pistol costs nothing, so it could still answer");
+  d.pass();
+  assert.match(d.log.join(" "), /You drop (Duck!|Pistol)/);
+});
+
+test("enemy reactions: raiders pin down your Reactions, crawlers spit venom at whoever hits them", () => {
+  const b = enemyBattle("raider", 3, "gunfire", ["duck"]);
+  b.foes[0]!.reaction = { card: "suppressing_fire", name: "Suppressing Fire", trigger: "reaction_card", counter: true };
+  b.endTurn();
+  assert.equal(b.respond, true);
+  b.play(100);
+  assert.equal(b.hp, 20 - 2, "Duck! was countered, so all of the Gunfire landed");
+  assert.match(b.log.join(" "), /Suppressing Fire stops Duck!/);
+
+  const c = enemyBattle("crawler", 1, "lurk", ["swing"]);
+  c.foes[0]!.reaction = { card: "spit_venom", name: "Spit Venom", trigger: "attacked", poison: 2 };
+  c.play(100, 1);
+  assert.equal(c.status.poison, 2);
+});
+
+// ---- continents ----
+
+test("the world is continents with open sea between them, and the base stands well inland", () => {
+  for (const seed of [12345, 777, 4242]) {
+    // Inland: no sea anywhere near the base.
+    for (let a = 0; a < 64; a++) {
+      for (const r of [0, 100, 250]) {
+        const x = Math.round(Math.cos((a / 64) * 2 * Math.PI) * r);
+        const y = Math.round(Math.sin((a / 64) * 2 * Math.PI) * r);
+        assert.ok(continentAt(seed, x, y) > CONTINENTS.sea + CONTINENTS.beach, `seed ${seed}: land at (${x}, ${y})`);
+      }
+    }
+    // Far and wide: lots of sea, much of it deep, and other continents across it.
+    let sea = 0, deep = 0, n = 0, farLand = 0;
+    for (let y = -4000; y <= 4000; y += 40) {
+      for (let x = -4000; x <= 4000; x += 40) {
+        const t = terrainAt(seed, x, y);
+        n++;
+        if (t === T.WATER || t === T.DEEP_WATER) sea++;
+        if (t === T.DEEP_WATER) deep++;
+        if (Math.hypot(x, y) > 2200 && t !== T.WATER && t !== T.DEEP_WATER && t !== T.BRIDGE) farLand++;
+      }
+    }
+    assert.ok(sea / n > 0.3 && sea / n < 0.75, `seed ${seed}: ${Math.round((100 * sea) / n)}% sea`);
+    assert.ok(deep / sea > 0.5, `seed ${seed}: most of the sea is open, deep water`);
+    assert.ok(farLand / n > 0.1, `seed ${seed}: other continents beyond the sea`);
+  }
+});
+
+test("old highways cross the sea as causeways, and nothing else stands in the water", () => {
+  const seed = 777;
+  let bridges = 0;
+  for (let y = -3000; y <= 3000; y += 3) {
+    for (let x = -3000; x <= 3000; x += 97) {
+      if (terrainAt(seed, x, y) !== T.BRIDGE) continue;
+      bridges++;
+      assert.ok(isPassable(T.BRIDGE));
+    }
+  }
+  assert.ok(bridges >= 5, `${bridges} causeway tiles sampled`);
+  assert.ok(!isPassable(T.DEEP_WATER) && !isPassable(T.WATER));
+});
+
+// ---- towns and highways ----
+
+test("highways lead somewhere: from the base you can follow the road to ruined towns", () => {
+  for (const seed of [777, 4242]) {
+    // Towns stand where their highways meet: a town's middle is road.
+    let towns = 0;
+    for (let gy = -3; gy <= 3; gy++) {
+      for (let gx = -3; gx <= 3; gx++) {
+        const t = townIn(seed, gx, gy);
+        if (!t || !t.r) continue;
+        towns++;
+        assert.ok([T.ROAD, T.BRIDGE].includes(terrainAt(seed, t.x, t.y)), `seed ${seed}: a highway runs into the town at (${t.x}, ${t.y})`);
+      }
+    }
+    assert.ok(towns >= 10, `seed ${seed}: ${towns} towns near the base`);
+    // Walk the roads out of the base (4-way, as players move): they reach towns.
+    const onRoad = (x: number, y: number) => [T.ROAD, T.BRIDGE, T.BASE_ICON].includes(terrainAt(seed, x, y));
+    const seen = new Set<string>(["0,0"]);
+    const queue: [number, number][] = [[0, 0]];
+    let reached = 0;
+    while (queue.length && seen.size < 20000) {
+      const [x, y] = queue.shift()!;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        const nx = x + dx;
+        const ny = y + dy;
+        const k = `${nx},${ny}`;
+        if (seen.has(k) || !onRoad(nx, ny)) continue;
+        seen.add(k);
+        queue.push([nx, ny]);
+      }
+    }
+    for (let gy = -3; gy <= 3; gy++) {
+      for (let gx = -3; gx <= 3; gx++) {
+        const t = townIn(seed, gx, gy);
+        if (t && t.r && seen.has(`${t.x},${t.y}`)) reached++;
+      }
+    }
+    assert.ok(reached >= 3, `seed ${seed}: the roads from the base reach ${reached} towns`);
+  }
+});
+
+test("the land has geology: mountain ranges, foothills around them, and wet coasts and dry interiors", () => {
+  for (const seed of [777, 12345]) {
+    let mountains = 0, hills = 0, land = 0, coastWet = 0, coastN = 0, inlandWet = 0, inlandN = 0;
+    for (let y = -3000; y <= 3000; y += 25) {
+      for (let x = -3000; x <= 3000; x += 25) {
+        const t = terrainAt(seed, x, y);
+        if (t === T.WATER || t === T.DEEP_WATER || t === T.BRIDGE) continue;
+        land++;
+        if (t === T.MOUNTAINS) mountains++;
+        if (t === T.HILLS) hills++;
+        const g = geology(seed, x, y);
+        const wet = t === T.DEAD_FOREST || t === T.SWAMP ? 1 : 0;
+        if (g.dry < 0.1) (coastWet += wet, coastN++);
+        else if (g.dry > 0.45) (inlandWet += wet, inlandN++);
+      }
+    }
+    assert.ok(mountains / land > 0.02 && mountains / land < 0.15, `seed ${seed}: ${Math.round((100 * mountains) / land)}% mountains`);
+    assert.ok(hills > mountains, `seed ${seed}: more foothills than peaks`);
+    assert.ok(coastWet / coastN > 1.5 * (inlandWet / inlandN), `seed ${seed}: the coasts are wetter than the interior`);
+  }
 });

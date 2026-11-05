@@ -12,7 +12,6 @@ extends Node2D
 ## ("you") always wins.
 
 const MENU_SCENE := "res://scenes/main_menu.tscn"
-const ENCOUNTER_SCENE := preload("res://scenes/encounter.tscn")
 const TILES_TEXTURE := preload("res://assets/tiles.png")
 const SPRITES_TEXTURE := preload("res://assets/sprites.png")
 const TILE := 16
@@ -46,7 +45,12 @@ var others := {} ## player id -> Node2D
 var other_positions := {} ## player id -> Vector2i, for the world map
 var monsters := {} ## monster id -> Sprite2D
 var monster_positions := {} ## monster id -> Vector2i
-var encounter: Node3D ## the first-person fight, while one is running
+var monster_kinds := {} ## monster id -> kind ("zombie", "raider"...)
+var encounter: BattleScreen ## the card battle, while one is running
+var cards_ui: CardsUI ## inventory, shops and card offers
+var cards_info: Dictionary = {} ## the latest "cards" message: scrap and every card owned
+var _pending_offer: Dictionary = {} ## a card offer that arrived mid-battle, shown once it's over
+var _battle_layer: CanvasLayer
 var last_encounter_result := ""
 ## "overworld", "base", "camp" or "dungeon": which map pos (and every position from the server) refers to.
 var location := "overworld"
@@ -135,6 +139,11 @@ func _ready() -> void:
 	add_child(_camp_labels)
 	move_child(_camp_labels, base_terrain.get_index() + 1)
 	map_view.setup(self, welcome.tiles)
+	cards_ui = CardsUI.new()
+	hud.get_node("Root").add_child(cards_ui)
+	_battle_layer = CanvasLayer.new()
+	_battle_layer.layer = 5
+	add_child(_battle_layer)
 
 	%ResumeButton.pressed.connect(_set_paused.bind(false))
 	%DisconnectButton.pressed.connect(_leave)
@@ -154,14 +163,19 @@ func _process(delta: float) -> void:
 	for msg in Net.drain():
 		_handle(msg)
 	_update_movement(delta)
-	# Radioactive glow: pulse the zombies' brightness.
+	# Radioactive glow: pulse the brightness of the zombies and ghouls.
 	var glow := 0.8 + 0.2 * sin(Time.get_ticks_msec() / 220.0)
-	monsters_root.modulate = Color(glow, 1.0, glow)
+	for id: int in monsters:
+		if monster_kinds.get(id, "") in ["zombie", "ghoul"]:
+			monsters[id].modulate = Color(glow, 1.0, glow)
 
 
 func _unhandled_input(event: InputEvent) -> void:
 	# The map, when open, sees input first and closes itself on open_map / Esc.
-	if _lost or encounter:
+	if _lost or encounter or cards_ui.is_open():
+		if cards_ui.is_open() and cards_ui.mode == "inventory" and event.is_action_pressed(&"inventory"):
+			cards_ui.close()
+			get_viewport().set_input_as_handled()
 		return
 	if event.is_action_pressed(&"ui_cancel"):
 		if dialog.visible:
@@ -181,6 +195,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event.is_action_pressed(&"open_map"):
 		_close_dialog()
 		map_view.open()
+		get_viewport().set_input_as_handled()
+	elif event.is_action_pressed(&"inventory"):
+		_close_dialog()
+		cards_ui.open_inventory()
 		get_viewport().set_input_as_handled()
 
 
@@ -211,19 +229,23 @@ func _handle(msg: Dictionary) -> void:
 				others.erase(id)
 			other_positions.erase(id)
 		"monster":
-			_upsert_monster(int(msg.id), Vector2i(int(msg.x), int(msg.y)))
+			_upsert_monster(int(msg.id), Vector2i(int(msg.x), int(msg.y)), str(msg.get("kind", "zombie")), int(msg.get("count", 1)))
 		"monster_left":
 			var id := int(msg.id)
 			if monsters.has(id):
 				monsters[id].queue_free()
 				monsters.erase(id)
 			monster_positions.erase(id)
+			monster_kinds.erase(id)
 		"location":
 			_arrive(msg)
 		"notice":
 			_log(str(msg.text))
 		"encounter_start":
 			_start_encounter(msg)
+		"battle":
+			if encounter and int(msg.id) == encounter.encounter_id:
+				encounter.update(msg.battle)
 		"encounter_over":
 			last_encounter_result = str(msg.result)
 			_set_pos(Vector2i(int(msg.x), int(msg.y)), true)
@@ -231,6 +253,22 @@ func _handle(msg: Dictionary) -> void:
 				"victory": _log("The dead lie still. You survived.")
 				"fled": _log("You got away... for now.")
 				"died": _log("You died. You wake up in the base's infirmary.")
+			_end_encounter()
+		"cards":
+			cards_info = msg
+			cards_ui.on_cards(msg)
+			_update_status()
+		"shop":
+			_close_dialog()
+			if cards_ui.mode == "shop":
+				cards_ui.on_shop(msg)
+			else:
+				cards_ui.open_shop(msg)
+		"offer":
+			if encounter:
+				_pending_offer = msg
+			else:
+				cards_ui.show_offer(msg)
 		"camp":
 			_add_camp(Vector2i(int(msg.x), int(msg.y)), str(msg.name))
 		"map_index":
@@ -341,8 +379,8 @@ func _on_disconnected(reason: String) -> void:
 	if encounter:
 		encounter.queue_free()
 		encounter = null
-		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 		_show_overworld(true)
+	cards_ui.close()
 	pause_menu.hide()
 	map_view.close()
 	lost_label.text = reason
@@ -363,7 +401,7 @@ func _update_movement(delta: float) -> void:
 		if Time.get_ticks_msec() - _pending_since_ms < MOVE_TIMEOUT_MS:
 			return
 		_pending_seq = -1 # The reply got lost; don't stall forever.
-	if _lost or pause_menu.visible or map_view.visible or encounter:
+	if _lost or pause_menu.visible or map_view.visible or encounter or cards_ui.is_open():
 		return
 	var action := _held_direction()
 	if action != &"" and dialog.visible:
@@ -568,30 +606,38 @@ func _close_dialog() -> void:
 
 func _start_encounter(msg: Dictionary) -> void:
 	map_view.close()
+	cards_ui.close()
+	_close_dialog()
 	_set_paused(false)
 	_pending_seq = -1
 	_show_overworld(false)
-	encounter = ENCOUNTER_SCENE.instantiate()
-	add_child(encounter)
+	encounter = BattleScreen.new()
+	_battle_layer.add_child(encounter)
 	encounter.setup(self, msg)
-	encounter.finished.connect(_on_encounter_finished.bind(int(msg.id)))
-	_log("Zombies! %d of them." % msg.enemies.size() if msg.enemies.size() != 1 else "A zombie is on you!")
+	var groups := PackedStringArray()
+	for e: Dictionary in msg.battle.enemies:
+		groups.append("%d %s" % [int(e.count), e.one if int(e.count) == 1 else e.many])
+	_log("Ambush! %s." % ", ".join(groups))
 
 
-func _on_encounter_finished(result: String, killed: Array, dir: String, id: int) -> void:
-	var msg := {"t": "encounter_end", "id": id, "result": result, "killed": killed, "hp": encounter.health}
-	var remaining: Dictionary = encounter.remaining()
-	if not remaining.is_empty():
-		msg.remaining = remaining
-	if not dir.is_empty():
-		msg.dir = dir
-	Net.send(msg)
-	encounter.queue_free()
+## The battle's decided: leave its result up a moment, then back to the map
+## (and any card offer that came with it).
+func _end_encounter() -> void:
+	var battle := encounter
+	if battle == null:
+		return
+	await get_tree().create_timer(1.2).timeout
+	if encounter != battle:
+		return
+	battle.queue_free()
 	encounter = null
 	_show_overworld(true)
+	if not _pending_offer.is_empty():
+		cards_ui.show_offer(_pending_offer)
+		_pending_offer = {}
 
 
-## The 2D view and the 3D fight never show at once.
+## The map and the battle screen never show at once.
 func _show_overworld(on: bool) -> void:
 	for node: CanvasItem in [players_root, monsters_root, npcs_root, avatar]:
 		node.visible = on
@@ -684,15 +730,33 @@ func _upsert_player(id: int, player_name: String, p: Vector2i) -> void:
 	other_positions[id] = p
 
 
-func _upsert_monster(id: int, p: Vector2i) -> void:
+## The sprites.png region for a kind of monster (from the welcome's list of them).
+func monster_region(kind: String) -> Rect2:
+	for m: Dictionary in Net.welcome.get("monsters", []):
+		if m.kind == kind:
+			return Rect2(int(m.sprite) * 16, 0, 16, 16)
+	return ZOMBIE_REGION
+
+
+func _monster_info(kind: String) -> Dictionary:
+	for m: Dictionary in Net.welcome.get("monsters", []):
+		if m.kind == kind:
+			return m
+	return {"one": kind, "many": kind}
+
+
+func _upsert_monster(id: int, p: Vector2i, kind := "zombie", count := 1) -> void:
 	var sprite: Sprite2D = monsters.get(id)
 	if sprite == null:
-		if monsters.is_empty():
-			_log("A radioactive zombie shambles out of the waste...")
+		if not monster_kinds.values().has(kind):
+			var info := _monster_info(kind)
+			var what: String = "A %s" % info.one if count == 1 else "%s %s" % [_some(count), info.many]
+			_log("%s, out in the %s..." % [what, "dark" if location == "dungeon" else "waste"])
 		sprite = Sprite2D.new()
 		sprite.texture = SPRITES_TEXTURE
 		sprite.region_enabled = true
-		sprite.region_rect = ZOMBIE_REGION
+		sprite.region_rect = monster_region(kind)
+		monster_kinds[id] = kind
 		sprite.position = _tile_center(p)
 		sprite.flip_h = p.x > pos.x # The art reaches right; face the player.
 		monsters_root.add_child(sprite)
@@ -708,6 +772,11 @@ func _upsert_monster(id: int, p: Vector2i) -> void:
 		sprite.set_meta(&"tween", tween)
 	monster_positions[id] = p
 	sprite.visible = location != "dungeon" or _in_sight.has(p)
+
+
+## "A few", "some", "a lot of": how many, roughly, as you'd see them coming.
+func _some(count: int) -> String:
+	return "A couple of" if count <= 2 else "A few" if count <= 5 else "A lot of"
 
 
 # ---- character ----
@@ -745,7 +814,7 @@ func _vitals(c: Dictionary) -> String:
 	if c.is_empty():
 		return ""
 	var level := int(c.level)
-	return "Lv %d  HP %d/%d  XP %d/%d" % [level, c.hp, c.maxHp, c.xp, 50 * (level + 1) * level]
+	return "Lv %d  HP %d/%d  XP %d/%d  Scrap %d" % [level, c.hp, c.maxHp, c.xp, 50 * (level + 1) * level, int(cards_info.get("scrap", 0))]
 
 
 func _sheet(c: Dictionary) -> String:
