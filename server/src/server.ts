@@ -789,18 +789,22 @@ export class GameServer {
       let ay = 0;
       for (const m of survivors) [ax, ay] = [ax + m.x - enc.x, ay + m.y - enc.y];
       const away: Dir = Math.abs(ax) >= Math.abs(ay) ? (ax > 0 ? "left" : "right") : ay > 0 ? "up" : "down";
-      const [dx, dy] = DIR_DELTA[away];
       const mobs = this.mobsFor(enc.loc);
-      for (let d = 3; d >= 1; d--) {
-        const nx = enc.x + dx * d;
-        const ny = enc.y + dy * d;
-        // Only as far as the way is clear (a dungeon wall stops you short).
-        let clear = true;
-        for (let i = 1; i <= d; i++) clear &&= this.standable(enc.loc, enc.x + dx * i, enc.y + dy * i);
-        if (clear && !survivors.some((m) => m.x === nx && m.y === ny) && !mobs?.at(nx, ny)) {
-          if (enc.loc === "overworld") [p.x, p.y] = [nx, ny];
-          else [p.bx, p.by] = [nx, ny];
-          break;
+      // Away from them if the way is open, otherwise whichever way is (ruins and walls block some).
+      const ways: Dir[] = [away, ...(["up", "down", "left", "right"] as Dir[]).filter((d) => d !== away)];
+      fled: for (const way of ways) {
+        const [dx, dy] = DIR_DELTA[way];
+        for (let d = 3; d >= 1; d--) {
+          const nx = enc.x + dx * d;
+          const ny = enc.y + dy * d;
+          // Only as far as the way is clear (a dungeon wall stops you short).
+          let clear = true;
+          for (let i = 1; i <= d; i++) clear &&= this.standable(enc.loc, enc.x + dx * i, enc.y + dy * i);
+          if (clear && !survivors.some((m) => m.x === nx && m.y === ny) && !mobs?.at(nx, ny)) {
+            if (enc.loc === "overworld") [p.x, p.y] = [nx, ny];
+            else [p.bx, p.by] = [nx, ny];
+            break fled;
+          }
         }
       }
     }

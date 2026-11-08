@@ -88,13 +88,18 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
   walked, but a few old highways run on across it as **causeways** (and
   inland lakes are crossed the same way).
 - **Towns and highways.** Ruined towns (from hamlets to sprawling ruins
-  about 90 tiles across) stand on a jittered grid, about one every 260 tiles
-  where there's land. The old highways run between them: every town, and the
-  base, is linked to its two or three nearest neighbours by a gently bending
-  highway that meets the others in the town's middle, carries on over hills,
-  through mountain passes and across lakes, and now and then out over the sea
-  to the nearest town on another continent. Follow a road and it takes you
-  somewhere. Tuning is `ROADS` in `server/src/worldgen.ts`.
+  about 90 tiles across) are rare: at most one to each cell of a jittered
+  grid about 430 tiles wide. Where a cell has a coast on open sea (not just
+  an inlet or a lake), its town is usually built on the shore as a **port**.
+  The base is a ruined town like the rest, with a clear square round its
+  icon. About two in three towns, nearly every port and always the base, are
+  on the old highways; the rest stand off on their own. Each town on the
+  network is linked to its two or three nearest neighbours on it by a gently
+  bending highway that meets the others in the town's middle, goes overland
+  over hills and through mountain passes, crosses lakes on causeways, and
+  now and then runs out over the sea from a port to the nearest town on
+  another shore. Follow a road and it takes you somewhere. Tuning is `ROADS`
+  in `server/src/worldgen.ts`.
 - Terrain: wasteland, dead scrub, dead forest, rubble, ruined buildings, old
   highways and causeways, hills, mountains, blast craters, hot (radioactive)
   zones, toxic water and the deep sea, sludge marsh and ash dunes. Hazards
@@ -244,8 +249,9 @@ Dev shortcut: `godot --path client -- --host 127.0.0.1 --port 7777 --name Ash --
     Burnt-out Car on the road, Hurl Debris on rubble, High Ground on hills,
     Ash Cloud on dunes, Dust Kick in open wasteland, Cave-in underground.
   - **Ending it:** kill every pack to win, or Flee (each pack gets one
-    half-strength parting hit, then you're out up to 3 tiles away from them
-    and they go back on the map). Die and you wake up in the base's
+    half-strength parting hit, then you're out up to 3 tiles away from them,
+    whichever way is open if ruins or walls block the way away, and they go
+    back on the map). Die and you wake up in the base's
     infirmary. Wounds carry over; afterwards you get 3 seconds' grace.
   - **Spoils:** 1–3 scrap per zombie's worth killed, 5 more for a win, XP
     by what you killed, and after a win a choice of three cards to keep (or

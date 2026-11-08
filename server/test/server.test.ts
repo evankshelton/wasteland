@@ -145,9 +145,13 @@ test("the overworld has a base icon at the origin with a highway south", () => {
   assert.deepEqual(generateChunk(7, 3, -2), generateChunk(7, 3, -2));
   assert.equal(terrainAt(7, 0, 0), T.BASE_ICON);
   for (let y = 1; y <= 24; y++) assert.equal(terrainAt(7, 0, y), T.ROAD);
-  for (const [x, y] of [[1, 0], [-1, 0], [0, -1], [8, 8]]) {
-    assert.ok(isPassable(terrainAt(7, x!, y!)), `(${x}, ${y}) near the base is walkable`);
+  for (const [x, y] of [[1, 0], [-1, 0], [0, -1], [3, 2], [-2, -3]]) {
+    assert.ok(isPassable(terrainAt(7, x!, y!)), `(${x}, ${y}) in the square round the base is walkable`);
   }
+  // The base is a ruined town like any other: ruins stand round its square.
+  let ruins = 0;
+  for (let y = -20; y <= 20; y++) for (let x = -20; x <= 20; x++) if (terrainAt(7, x, y) === T.RUINS) ruins++;
+  assert.ok(ruins > 50, `${ruins} ruined buildings round the base`);
 });
 
 test("the base map loads with a walkable entry, respawn and gate roads", () => {
@@ -1346,12 +1350,12 @@ test("highways lead somewhere: from the base you can follow the road to ruined t
     for (let gy = -3; gy <= 3; gy++) {
       for (let gx = -3; gx <= 3; gx++) {
         const t = townIn(seed, gx, gy);
-        if (!t || !t.r) continue;
+        if (!t || !t.hub || (gx === 0 && gy === 0)) continue; // (the base's middle is its icon)
         towns++;
         assert.ok([T.ROAD, T.BRIDGE].includes(terrainAt(seed, t.x, t.y)), `seed ${seed}: a highway runs into the town at (${t.x}, ${t.y})`);
       }
     }
-    assert.ok(towns >= 10, `seed ${seed}: ${towns} towns near the base`);
+    assert.ok(towns >= 4, `seed ${seed}: ${towns} towns on the highways near the base`);
     // Walk the roads out of the base (4-way, as players move): they reach towns.
     const onRoad = (x: number, y: number) => [T.ROAD, T.BRIDGE, T.BASE_ICON].includes(terrainAt(seed, x, y));
     const seen = new Set<string>(["0,0"]);
@@ -1371,7 +1375,7 @@ test("highways lead somewhere: from the base you can follow the road to ruined t
     for (let gy = -3; gy <= 3; gy++) {
       for (let gx = -3; gx <= 3; gx++) {
         const t = townIn(seed, gx, gy);
-        if (t && t.r && seen.has(`${t.x},${t.y}`)) reached++;
+        if (t && t.hub && seen.has(`${t.x},${t.y}`)) reached++;
       }
     }
     assert.ok(reached >= 3, `seed ${seed}: the roads from the base reach ${reached} towns`);

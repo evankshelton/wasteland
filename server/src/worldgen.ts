@@ -9,10 +9,11 @@
 // The base stands well inland on the continent at the origin. Toxic shallows line the coasts, the open sea beyond is deep, and ash
 // beaches and marsh fringe the shore.
 //
-// The ruined towns sit on a wide jittered grid, one to a cell where there's
-// land, and the old highways run between them: every town (and the base) is
-// linked to its nearest neighbours, along a gently bending line, so roads lead
-// somewhere. A highway carries on over hills and through mountain passes, and
+// The ruined towns are few and far between: at most one to a wide jittered
+// grid cell, often built on the shore as a port where the cell has a coast.
+// The base is one of them. Only some towns are on the old highways, which run
+// between those: each linked to its nearest neighbours on the network, along
+// a gently bending line, so roads lead somewhere; the rest stand on their own. A highway carries on over hills and through mountain passes, and
 // over lakes and the sea as a causeway, though only a few links across the
 // sea were ever built: that's how you reach the other continents.
 import { fbm, hash2, rand2 } from "./noise.ts";
@@ -196,27 +197,37 @@ function baseTile(x: number, y: number): number | undefined {
 // ---- towns and the highways between them ----
 
 export const ROADS = {
-  cell: 260, // one town (at most) per cell of this many tiles
-  jitter: 0.32, // how far from its cell's middle a town may sit (x cell)
-  townChance: 0.8, // a cell with land in the middle has a town this often
+  cell: 430, // one town (at most) per cell of this many tiles
+  jitter: 0.3, // how far from its cell's middle a town may sit (x cell)
+  townChance: 0.7, // a cell with land where it wants a town has one this often
   inland: 0.05, // ...if its spot is at least this far inland (continent units)
+  port: 0.8, // chance a town in a cell with a coast is built on the shore, as a port
+  portReach: 40, // a port is within this many tiles of the water, and it's open water a long way out
+  portHub: 0.9, // ports are nearly always on the highways
   radius: [9, 44], // a town's size, centre to edge (big ones are rarer)
-  links: 2, // every town is linked to its nearest neighbours...
+  baseRadius: 26, // the base's town
+  plaza: 4, // ...kept clear of ruins this far round the base's icon
+  hub: 0.6, // share of towns on the highway network (the rest are off the roads)
+  links: 2, // every town on the network is linked to its nearest neighbours on it...
   extraLink: 0.3, // ...and now and then one more, so the network has loops
   bend: 0.22, // how far a highway bows away from the straight line (x its length)
   seaCrossing: 0.3, // chance a link to a neighbour with sea in the way was built anyway, as a causeway
-  causeway: 0.45, // chance a town by the sea has a causeway out to the nearest town across it (up to 2 cells off)
+  causeway: 0.5, // chance a town by the sea has a causeway out to the nearest town across it
   width: 0.8, // tiles within this distance of a highway's line are road (4-way walkable)
 } as const;
 
-/** A town (or the base) on the road network. */
+/** A ruined town (the base is one too). */
 export interface Town {
   gx: number;
   gy: number;
   x: number;
   y: number;
-  /** Its ruins reach this far (0 for the base, which has none). */
+  /** Its ruins reach this far. */
   r: number;
+  /** On the highway network. */
+  hub: boolean;
+  /** Built on the shore. */
+  port: boolean;
 }
 
 interface Highway {
@@ -234,7 +245,7 @@ const linkMemo = new Map<string, { to: Town; causeway: boolean }[]>();
 const roadMemo = new Map<string, Highway | null>();
 const nearMemo = new Map<string, Highway[]>();
 
-/** The town in road cell (gx, gy), if there is one. Cell (0, 0)'s is the base. */
+/** The town in road cell (gx, gy), if there is one. Cell (0, 0)'s is the base's, which is always on the highways. */
 export function townIn(seed: number, gx: number, gy: number): Town | undefined {
   const key = `${seed}:${gx}:${gy}`;
   const memo = townMemo.get(key);
@@ -242,16 +253,40 @@ export function townIn(seed: number, gx: number, gy: number): Town | undefined {
   let town: Town | null = null;
   const R = ROADS;
   if (gx === 0 && gy === 0) {
-    town = { gx, gy, x: BASE.icon.x, y: BASE.icon.y, r: 0 };
+    town = { gx, gy, x: BASE.icon.x, y: BASE.icon.y, r: R.baseRadius, hub: true, port: false };
   } else {
     const h = hash2(seed + CH.town, gx, gy);
-    const j = (bits: number) => ((bits & 0xff) / 255 - 0.5) * 2 * R.jitter * R.cell;
-    const x = Math.round(gx * R.cell + j(h >>> 8));
-    const y = Math.round(gy * R.cell + j(h >>> 16));
     const size = (h >>> 24) / 255;
-    const far = Math.hypot(x - BASE.icon.x, y - BASE.icon.y) > BASE.calmRadius + 30;
-    if ((h & 0xff) / 256 < R.townChance && far && continentAt(seed, x, y) - CONTINENTS.sea > R.inland) {
-      town = { gx, gy, x, y, r: Math.round(R.radius[0] + size * size * (R.radius[1] - R.radius[0])) };
+    const r = Math.round(R.radius[0] + size * size * (R.radius[1] - R.radius[0]));
+    const hub = rand2(seed + CH.town + 1, gx, gy) < R.hub;
+    const clear = (x: number, y: number) => Math.hypot(x - BASE.icon.x, y - BASE.icon.y) > R.baseRadius + r + 120;
+    if ((h & 0xff) / 256 < R.townChance) {
+      // A port, on the shore, if the cell has one and the dice say so...
+      if (rand2(seed + CH.town + 2, gx, gy) < R.port) {
+        for (let i = 0; i < 16 && !town; i++) {
+          const x = Math.round((gx + (rand2(seed + CH.town + 3, gx * 31 + i, gy) - 0.5) * 2 * R.jitter) * R.cell);
+          const y = Math.round((gy + (rand2(seed + CH.town + 4, gx, gy * 31 + i) - 0.5) * 2 * R.jitter) * R.cell);
+          const land = continentAt(seed, x, y) - CONTINENTS.sea;
+          if (land < R.inland * 0.4 || land > R.inland * 3 || !clear(x, y)) continue;
+          for (let a = 0; a < 8; a++) {
+            // Facing a sea, not an inlet or a lake: still water at three and six times the reach.
+            const dx = Math.cos((a / 8) * 2 * Math.PI);
+            const dy = Math.sin((a / 8) * 2 * Math.PI);
+            const open = [1, 3, 6].every((k) => continentAt(seed, x + dx * R.portReach * k, y + dy * R.portReach * k) < CONTINENTS.sea);
+            if (open) {
+              town = { gx, gy, x, y, r, hub: rand2(seed + CH.town + 5, gx, gy) < R.portHub, port: true };
+              break;
+            }
+          }
+        }
+      }
+      // ...otherwise inland, somewhere about the middle of the cell.
+      if (!town) {
+        const j = (bits: number) => ((bits & 0xff) / 255 - 0.5) * 2 * R.jitter * R.cell;
+        const x = Math.round(gx * R.cell + j(h >>> 8));
+        const y = Math.round(gy * R.cell + j(h >>> 16));
+        if (clear(x, y) && continentAt(seed, x, y) - CONTINENTS.sea > R.inland) town = { gx, gy, x, y, r, hub, port: false };
+      }
     }
   }
   townMemo.set(key, town);
@@ -269,17 +304,23 @@ function linksOf(seed: number, t: Town): { to: Town; causeway: boolean }[] {
   if (links) return links;
   const near: Town[] = [];
   const far: Town[] = [];
+  if (!t.hub) {
+    linkMemo.set(key, []);
+    return [];
+  }
   for (let oy = -2; oy <= 2; oy++) {
     for (let ox = -2; ox <= 2; ox++) {
       const o = (ox || oy) ? townIn(seed, t.gx + ox, t.gy + oy) : undefined;
-      if (o) (Math.max(Math.abs(ox), Math.abs(oy)) === 1 ? near : far).push(o);
+      if (o?.hub) (Math.max(Math.abs(ox), Math.abs(oy)) === 1 ? near : far).push(o);
     }
   }
   const dist = (o: Town) => Math.hypot(o.x - t.x, o.y - t.y);
   near.sort((a, b) => dist(a) - dist(b));
   far.sort((a, b) => dist(a) - dist(b));
   const n = ROADS.links + (rand2(seed + CH.link, t.gx, t.gy) < ROADS.extraLink ? 1 : 0);
-  links = near.slice(0, n).map((to) => ({ to, causeway: false }));
+  // Ordinary highways go overland (to the nearest towns, or with towns this rare, two cells off); the sea is for causeways.
+  const overland = (o: Town) => continentAt(seed, (o.x + t.x) / 2, (o.y + t.y) / 2) >= CONTINENTS.sea;
+  links = [...near.filter(overland), ...far.filter(overland)].slice(0, n).map((to) => ({ to, causeway: false }));
   if (rand2(seed + CH.link + 1, t.gx, t.gy) < ROADS.causeway) {
     const across = [...near, ...far].find((o) => continentAt(seed, (o.x + t.x) / 2, (o.y + t.y) / 2) < CONTINENTS.sea);
     if (across) links.push({ to: across, causeway: true });
@@ -369,7 +410,7 @@ export function townAt(seed: number, x: number, y: number): Town | undefined {
   for (let oy = -1; oy <= 1; oy++) {
     for (let ox = -1; ox <= 1; ox++) {
       const t = townIn(seed, gx + ox, gy + oy);
-      if (!t || !t.r) continue;
+      if (!t) continue;
       const edge = t.r * (0.8 + 0.35 * fbm(seed + CH.townEdge, x / 14, y / 14, 2));
       if (Math.hypot(x - t.x, y - t.y) < edge) return t;
     }
@@ -455,7 +496,7 @@ export function terrainAt(seed: number, x: number, y: number): number {
   if (elev < -0.29 && geo.relief < 0.3) return moist > -0.1 ? T.SWAMP : T.WASTELAND;
   if (height > 0.46) return T.HILLS;
 
-  if (townAt(seed, x, y)) return cityTile(seed, x, y);
+  if (townAt(seed, x, y) && dist > ROADS.plaza) return cityTile(seed, x, y);
 
   const crater = hazard > 0 ? craterTile(seed, x, y, hazard) : undefined;
   if (crater !== undefined) return crater;
